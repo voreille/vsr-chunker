@@ -1,4 +1,4 @@
-# FlashVSR (Wan 2.1 1.3B) x2 via Kijai's ComfyUI-WanVideoWrapper ("barebones" port: no sparse attention).
+# FlashVSR (Wan 2.1 1.3B) via Kijai's ComfyUI-WanVideoWrapper ("barebones" port: no sparse attention).
 # Built from custom_nodes/ComfyUI-WanVideoWrapper/example_workflows/wanvideo_1_3B_FlashVSR_upscale_example.json
 name: flashvsr_1_3b
 workflow: workflows/flashvsr_1_3b_api.json
@@ -10,6 +10,11 @@ output:
   prefix_field: "filename_prefix"
   frame_delay: 1         # this port's output lags its input by one frame (measured 2026-11-09);
                          # the tool sends extra frames and drops the first output frame
+resize:                  # output size, set from --height (default 1080) or --scale
+  node_id: "3"           # Resize Image/Mask, "scale dimensions"
+  width_field: "resize_type.width"
+  height_field: "resize_type.height"
+  multiple: 16           # FlashVSR needs both sides divisible by 16 (1080 -> 1088)
 # Seed: WanVideoSampler [11].seed is detected and set per job.
 overrides:
   "8":                   # WanVideoModelLoader: SageAttention, ~33% faster than sdpa, same output

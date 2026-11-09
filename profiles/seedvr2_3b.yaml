@@ -1,4 +1,4 @@
-# SeedVR2 3B (INT8 convrot checkpoint) - x2 upscale via ComfyUI's "Utility: SeedVR2 upscale video" template.
+# SeedVR2 3B (INT8 convrot checkpoint) - upscale (to --height, default 1080) via ComfyUI's "Utility: SeedVR2 upscale video" template.
 name: seedvr2_3b
 workflow: workflows/utility_seedvr2_3b_int8_upscale_video.json
 input:
@@ -7,6 +7,11 @@ input:
 output:
   node_id: "76"          # SaveVideo
   prefix_field: "filename_prefix"
+resize:                  # output size, set from --height (default 1080) or --scale
+  node_id: "66:57"       # Resize Image/Mask, "scale dimensions" (SeedVR2 pads internally: any size works)
+  width_field: "resize_type.width"
+  height_field: "resize_type.height"
+  multiple: 2
 # Seed: the KSampler seed ([66:54].seed) is detected and set per job automatically.
 overrides:
   "66:59":               # SeedVR2 Post-Process. The template ships with "none"; the node default

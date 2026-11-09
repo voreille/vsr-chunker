@@ -59,7 +59,8 @@ def fake_processor(kind: str, logfile: Path) -> Processor:
     raise PipelineError(f"unknown fake model {kind!r} (use identity, scale2 or delay1)")
 
 
-def comfy_processor(client, profile, job_id: str, seed: int, *, timeout: float = 3600.0) -> Processor:
+def comfy_processor(client, profile, job_id: str, seed: int, *, timeout: float = 3600.0,
+                    size: tuple[int, int] | None = None) -> Processor:
     """Process a chunk through ComfyUI: upload -> patch -> queue -> wait -> download."""
     from .comfy import ComfyError
     from .profiles import patch_workflow
@@ -67,7 +68,7 @@ def comfy_processor(client, profile, job_id: str, seed: int, *, timeout: float =
     def proc(i: int, src: Path, dst: Path) -> Path:
         name = f"vsr_{job_id}_{i:03d}{src.suffix}"
         value = client.upload(src, name=name, subfolder="vsr")
-        wf = patch_workflow(profile, value, f"vsr/vsr_{job_id}_{i:03d}", seed)
+        wf = patch_workflow(profile, value, f"vsr/vsr_{job_id}_{i:03d}", seed, size)
         prompt_id = client.queue(wf)
         try:
             entry = client.wait(prompt_id, timeout=timeout)
@@ -96,7 +97,7 @@ def fmt_dur(s: float) -> str:
 
 def run_job(plan, *, job_dir: Path, master_path: Path, processor: Processor,
             codec: str = "dnxhr", ten_bit: bool = False, args_record: dict | None = None,
-            redo: list[int] | None = None) -> Path:
+            redo: list[int] | None = None, expect_size: tuple[int, int] | None = None) -> Path:
     """``plan`` is a cli.RunPlan. Resumable: chunks marked done in ``job_dir/manifest.json``
     (with an intact output file) are skipped. Returns the path of the verified master."""
     from .comfy import ComfyError, ComfyFatalError
@@ -165,6 +166,11 @@ def run_job(plan, *, job_dir: Path, master_path: Path, processor: Processor,
                     f"chunk {i}: model output {out} has {oi.frame_count} frames, expected {model_len[i]} "
                     f"(source frames {plan.range_start + c.start}..{plan.range_start + c.end}, pad {c.pad}"
                     + (f", +{model_len[i] - c.padded_length} for frame_delay {delay}" if delay else "") + ")"
+                )
+            if expect_size and (oi.width, oi.height) != tuple(expect_size):
+                raise PipelineError(
+                    f"chunk {i}: model output is {oi.width}x{oi.height}, expected {expect_size[0]}x{expect_size[1]} "
+                    "(does the profile's resize node really set the output size?)"
                 )
         except ComfyFatalError as e:
             m.mark_failed(i, str(e), time.monotonic() - t)

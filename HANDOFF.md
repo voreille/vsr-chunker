@@ -1,6 +1,18 @@
 # HANDOFF
 
-## Current milestone: 4 done (manifest, resume, redo, status, ETA) + FlashVSR profile. Next: milestone 5.
+## Current milestone: 4 done (manifest, resume, redo, status, ETA) + FlashVSR profile + output size. Next: milestone 5.
+
+### Done (session 2026-11-09, output size)
+- Profile `resize:` section (`profiles.Resize`: node_id, width_field, height_field, multiple).
+  `vsr run --height N` (default 1080) / `--scale F` -> `profiles.output_size()` -> patched into the
+  workflow; the job id includes the size; each chunk's output size is checked (`expect_size`).
+  A profile without `resize` keeps the workflow's size and rejects --height/--scale.
+- Both workflows' "Resize Image/Mask" nodes now use "scale dimensions" (was "scale by multiplier" 2).
+  FlashVSR: multiple 16 (1080 -> 1088); the extra ImageResizeKJv2 node was removed.
+- Verified on the server: 1280x720 -> SeedVR2 1920x1080, FlashVSR 1920x1088.
+- ComfyUI now runs with `--fast fp16_accumulation` (user restarted it). 97-frame chunk: SeedVR2 INT8
+  186.6 -> 154.7 s, output unchanged (50.6 dB vs before); fp16 checkpoint 512 tiles 170.5 s, 1024
+  tiles 136.1 s / 17.1 GiB; FlashVSR 97.4 -> 109.4 s (single run, maybe noise).
 
 ### Done (session 2026-11-09, FlashVSR profile)
 - `profiles/flashvsr_1_3b.yaml` + `workflows/flashvsr_1_3b_api.json` (Kijai WanVideoWrapper port, x2).
@@ -87,7 +99,7 @@
   trailing chunk that is only overlap. Exhaustively tested for 1..399 frames.
 - `vsr/profiles.py`: YAML profile loading + validation against the workflow JSON (nodes/fields
   exist, UI-format rejected), seed-field detection, `describe_workflow` for `vsr inspect`.
-  Extra optional keys: `output.prefix_field` (default `filename_prefix`), `output.frame_delay`, `chunk.max_seconds`.
+  Extra optional keys: `output.prefix_field` (default `filename_prefix`), `output.frame_delay`, `resize`, `chunk.max_seconds`.
 - `vsr/ffmpeg.py`: argv builders for CFR conversion, frame-exact cut
   (`trim=start_frame:end_frame,setpts,tpad=clone`), and master (DNxHR HQ/HQX, ProRes; audio
   copy or PCM when trimmed; timecode offset for --range; color tags).

@@ -41,3 +41,22 @@ def test_errors_are_clean(clip, capsys, tmp_path):
 def test_inspect(capsys):
     assert main(["inspect", "workflows/utility_seedvr2_3b_int8_upscale_video.json"]) == 0
     assert "[66:54] KSampler" in capsys.readouterr().out
+
+
+def test_output_size_options(clip, capsys, tmp_path):
+    assert main(["run", str(clip), "--profile", "seedvr2_3b", "--dry-run"]) == 0
+    assert "size       1440x1080 -> [66:57]" in capsys.readouterr().out  # 320x240 -> default 1080p
+    assert main(["run", str(clip), "--profile", "seedvr2_3b", "--dry-run", "--height", "480"]) == 0
+    assert "size       640x480" in capsys.readouterr().out
+    assert main(["run", str(clip), "--profile", "flashvsr_1_3b", "--dry-run", "--scale", "1.5"]) == 0
+    assert "size       480x352" in capsys.readouterr().out  # multiple of 16
+    # a profile without a resize section rejects --height
+    import re
+    from vsr.profiles import PROJECT_ROOT
+    text = (PROJECT_ROOT / "profiles/seedvr2_3b.yaml").read_text()
+    text = re.sub(r"(?s)resize:.*?multiple: 2\n", "", text)
+    (tmp_path / "noresize.yaml").write_text(text.replace("workflows/", str(PROJECT_ROOT / "workflows") + "/"))
+    assert main(["run", str(clip), "--profile", str(tmp_path / "noresize.yaml"), "--dry-run"]) == 0
+    assert "fixed by the workflow" in capsys.readouterr().out
+    assert main(["run", str(clip), "--profile", str(tmp_path / "noresize.yaml"), "--dry-run", "--height", "720"]) == 1
+    assert "no 'resize' section" in capsys.readouterr().err

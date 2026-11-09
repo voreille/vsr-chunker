@@ -130,13 +130,15 @@
   },
   "66:57": {
     "inputs": {
-      "resize_type": "scale by multiplier",
-      "resize_type.multiplier": 2,
+      "resize_type": "scale dimensions",
       "scale_method": "lanczos",
       "input": [
         "66:74",
         0
-      ]
+      ],
+      "resize_type.width": 1920,
+      "resize_type.height": 1080,
+      "resize_type.crop": "disabled"
     },
     "class_type": "ResizeImageMaskNode",
     "_meta": {

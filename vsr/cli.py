@@ -17,7 +17,7 @@ from .comfy import ComfyClient, ComfyError, ComfyFatalError
 from .job import MANIFEST, JobError, Manifest, parse_redo
 from .pipeline import PipelineError, comfy_processor, fake_processor, fmt_dur, run_ffmpeg, run_job
 from .probe import ProbeError, VideoInfo, check_tools, probe
-from .profiles import PROJECT_ROOT, Profile, ProfileError, describe_workflow, load_profile, load_workflow
+from .profiles import PROJECT_ROOT, Profile, ProfileError, describe_workflow, load_profile, load_workflow, output_size
 
 DEFAULT_SERVER = "http://127.0.0.1:8188"
 JOBS_DIR = PROJECT_ROOT / "jobs"
@@ -55,14 +55,21 @@ class RunPlan:
     job_id: str
     warnings: list[str]
     frame_source: str  # file the chunks are cut from (the source, or its CFR conversion)
+    out_size: tuple[int, int] | None = None  # (w, h) set in the workflow; None: the model's native factor
 
 
-def make_job_id(info: VideoInfo, profile: Profile, frames: int, overlap: int, rs: int, rn: int, seed: int | None) -> str:
+DEFAULT_HEIGHT = 1080
+
+
+def make_job_id(info: VideoInfo, profile: Profile, frames: int, overlap: int, rs: int, rn: int, seed: int | None,
+                size: tuple[int, int] | None = None) -> str:
     src = Path(info.path).resolve()
     st = src.stat()
     key = f"{src}|{st.st_size}|{st.st_mtime_ns}|{profile.name}|{frames}|{overlap}|{rs}|{rn}|{seed}"
     if profile.frame_delay:  # changes what is sent to the model (kept out otherwise: stable ids)
         key += f"|delay{profile.frame_delay}"
+    if size:
+        key += f"|{size[0]}x{size[1]}"
     return f"{src.stem[:40]}_{profile.name}_{hashlib.sha1(key.encode()).hexdigest()[:8]}"
 
 
@@ -103,9 +110,20 @@ def build_plan(args, info: VideoInfo | None = None, frames_info: VideoInfo | Non
     if overlap < 4 and len(chunks) > 1:
         warnings.append(f"overlap={overlap} is small; diffusion models need a crossfade of several frames")
 
-    job_id = make_job_id(info, profile, frames, overlap, rs, rn, args.seed)
+    height, scale = getattr(args, "height", None), getattr(args, "scale", None)
+    size = None
+    if profile.resize:
+        size = output_size(fsrc.width, fsrc.height, target_height=height or DEFAULT_HEIGHT, scale=scale,
+                           multiple=profile.resize.multiple)
+        if size[1] < fsrc.height:
+            warnings.append(f"output {size[0]}x{size[1]} is smaller than the source {fsrc.width}x{fsrc.height}")
+    elif height or scale:
+        raise CliError(f"profile {profile.name} has no 'resize' section, so --height/--scale can't be applied "
+                       "(its output size is fixed by the workflow)")
+
+    job_id = make_job_id(info, profile, frames, overlap, rs, rn, args.seed, size)
     seed = args.seed if args.seed is not None else int(job_id.rsplit("_", 1)[1], 16) % 2**31
-    return RunPlan(info, profile, rs, rn, chunks, frames, overlap, seed, job_id, warnings, fsrc.path)
+    return RunPlan(info, profile, rs, rn, chunks, frames, overlap, seed, job_id, warnings, fsrc.path, size)
 
 
 def _fmt_tc(frame: int, fps: Fraction) -> str:
@@ -138,6 +156,12 @@ def print_dry_run(p: RunPlan, args) -> None:
     out(f"  workflow   {prof.workflow_path}")
     wf = prof.workflow
     out(f"  input      [{prof.input_node}] {wf[prof.input_node]['class_type']}.{prof.input_field}")
+    if p.out_size:
+        rz = prof.resize
+        out(f"  size       {p.out_size[0]}x{p.out_size[1]} -> [{rz.node_id}] {wf[rz.node_id]['class_type']}."
+            f"{rz.width_field}/{rz.height_field}")
+    else:
+        out("  size       fixed by the workflow (profile has no 'resize' section)")
     out(f"  output     [{prof.output_node}] {wf[prof.output_node]['class_type']} "
         f"({prof.output_prefix_field}=vsr_{p.job_id}_<chunk>)")
     for nid, fields in prof.overrides.items():
@@ -246,14 +270,15 @@ def cmd_run(args) -> int:
     out_dir = Path(args.out) if args.out else Path(info.path).resolve().parent
     master = out_dir / ff.master_output_name(info, plan.profile.name, None, None)
     if client:
-        processor = comfy_processor(client, plan.profile, plan.job_id, plan.seed, timeout=args.timeout)
+        processor = comfy_processor(client, plan.profile, plan.job_id, plan.seed, timeout=args.timeout,
+                                    size=plan.out_size)
     else:
         processor = fake_processor(args.fake, job_dir / "logs" / "model.log")
     print(f"(resume later with: vsr resume {plan.job_id})", flush=True)
     try:
         run_job(plan, job_dir=job_dir, master_path=master, processor=processor,
                 codec=args.codec, ten_bit=args.ten_bit, args_record=run_args_record(args),
-                redo=parse_redo(args.redo))
+                redo=parse_redo(args.redo), expect_size=None if args.fake else plan.out_size)
     finally:
         if client:
             client.close()
@@ -262,7 +287,7 @@ def cmd_run(args) -> int:
 
 # Arguments of `vsr run` stored in the manifest, so `vsr resume <id>` can replay them.
 RUN_ARG_KEYS = ("video", "profile", "out", "server", "seed", "frames", "overlap", "range",
-                "codec", "ten_bit", "timeout", "fake")
+                "height", "scale", "codec", "ten_bit", "timeout", "fake")
 
 
 def run_args_record(args) -> dict:
@@ -345,6 +370,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--frames", type=int, help="frames per chunk (overrides the profile)")
     p.add_argument("--overlap", type=int, help="overlap frames between chunks (overrides the profile)")
     p.add_argument("--range", help="only process START-END seconds of the source, e.g. 10-15.5")
+    size = p.add_mutually_exclusive_group()
+    size.add_argument("--height", type=int, help=f"output height in pixels, width from the aspect ratio "
+                      f"(default {DEFAULT_HEIGHT}; profiles with a 'resize' section)")
+    size.add_argument("--scale", type=float, help="output size as a factor of the source, e.g. 1.5")
     p.add_argument("--codec", choices=["dnxhr", "prores"], default="dnxhr", help="master codec")
     p.add_argument("--10bit", dest="ten_bit", action="store_true", help="10-bit master (DNxHR HQX)")
     p.add_argument("--dry-run", action="store_true", help="probe + plan + print commands; don't touch ComfyUI")

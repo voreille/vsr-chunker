@@ -20,6 +20,15 @@ class ProfileError(ValueError):
 
 
 @dataclass
+class Resize:
+    """Workflow node whose width/height fields set the output size (``--height`` / ``--scale``)."""
+    node_id: str
+    width_field: str
+    height_field: str
+    multiple: int = 2  # both sides are rounded to a multiple of this (2: 4:2:2 masters need even widths)
+
+
+@dataclass
 class Profile:
     name: str
     path: Path
@@ -34,6 +43,7 @@ class Profile:
     frame_multiple: FrameMultiple
     overrides: dict[str, dict] = field(default_factory=dict)
     max_seconds: float | None = None  # warn if a chunk is longer (e.g. SeedVR2 INT8 crash limit)
+    resize: Resize | None = None
     frame_delay: int = 0  # model output frame n shows input frame n - frame_delay (FlashVSR port: 1)
 
     def seed_fields(self) -> list[tuple[str, str]]:
@@ -155,6 +165,27 @@ def load_profile(name_or_path: str) -> Profile:
     if max_seconds is not None and (not isinstance(max_seconds, (int, float)) or max_seconds <= 0):
         errors.append(f"chunk.max_seconds must be a positive number, got {max_seconds!r}")
 
+    resize = None
+    rz = raw.get("resize")
+    if rz is not None:
+        try:
+            resize = Resize(str(_require(rz, "node_id", f"{ctx} resize")),
+                            str(_require(rz, "width_field", f"{ctx} resize")),
+                            str(_require(rz, "height_field", f"{ctx} resize")),
+                            rz.get("multiple", 2))
+        except ProfileError as e:
+            errors.append(str(e))
+        else:
+            if resize.node_id not in wf:
+                errors.append(f"resize.node_id {resize.node_id!r} not in workflow")
+            else:
+                for f in (resize.width_field, resize.height_field):
+                    if f not in wf[resize.node_id].get("inputs", {}):
+                        errors.append(f"resize: {f!r} not an input of node {resize.node_id} "
+                                      f"({wf[resize.node_id]['class_type']}); has {list(wf[resize.node_id].get('inputs', {}))}")
+            if not isinstance(resize.multiple, int) or resize.multiple < 1:
+                errors.append(f"resize.multiple must be a positive integer, got {resize.multiple!r}")
+
     frame_delay = out.get("frame_delay", 0)
     if not isinstance(frame_delay, int) or isinstance(frame_delay, bool) or frame_delay < 0:
         errors.append(f"output.frame_delay must be a non-negative integer, got {frame_delay!r}")
@@ -176,6 +207,7 @@ def load_profile(name_or_path: str) -> Profile:
         frame_multiple=fm,
         overrides=overrides,
         max_seconds=float(max_seconds) if max_seconds is not None else None,
+        resize=resize,
         frame_delay=frame_delay,
     )
 
@@ -199,9 +231,25 @@ def describe_workflow(wf: dict) -> list[str]:
     return lines
 
 
-def patch_workflow(profile: Profile, input_value: str, prefix: str, seed: int | None) -> dict:
+def output_size(width: int, height: int, *, target_height: int | None = None, scale: float | None = None,
+                multiple: int = 2) -> tuple[int, int]:
+    """Output (w, h) for a ``width x height`` source: the target height (or ``height * scale``),
+    width from the source aspect ratio, both rounded to the nearest ``multiple``."""
+    th = height * scale if scale is not None else target_height
+    if not th or th <= 0:
+        raise ProfileError(f"invalid output size (height {target_height}, scale {scale})")
+
+    def rnd(v: float) -> int:
+        return max(multiple, round(v / multiple) * multiple)
+
+    return rnd(width * th / height), rnd(th)
+
+
+def patch_workflow(profile: Profile, input_value: str, prefix: str, seed: int | None,
+                   size: tuple[int, int] | None = None) -> dict:
     """Return a patched deep copy of the profile's workflow: input filename, output prefix,
-    overrides, and every literal seed field set to ``seed``."""
+    overrides, every literal seed field set to ``seed``, and the output ``size`` (w, h) if the
+    profile has a ``resize`` node."""
     import copy
 
     wf = copy.deepcopy(profile.workflow)
@@ -212,4 +260,9 @@ def patch_workflow(profile: Profile, input_value: str, prefix: str, seed: int | 
         wf[nid]["inputs"].update(fields)
     wf[profile.input_node]["inputs"][profile.input_field] = input_value
     wf[profile.output_node]["inputs"][profile.output_prefix_field] = prefix
+    if size is not None:
+        if profile.resize is None:
+            raise ProfileError(f"profile {profile.name} has no 'resize' section; its output size can't be set")
+        node = wf[profile.resize.node_id]["inputs"]
+        node[profile.resize.width_field], node[profile.resize.height_field] = size
     return wf

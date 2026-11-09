@@ -64,3 +64,18 @@ def test_repo_profiles_are_valid():
 def test_describe():
     text = "\n".join(describe_workflow(WF))
     assert '[1] LoadVideo  "Load"' in text and "model <- [3].0" in text
+
+
+def test_output_size_and_resize_patch():
+    from vsr.profiles import load_profile, output_size, patch_workflow
+    assert output_size(1280, 720, target_height=1080) == (1920, 1080)
+    assert output_size(960, 544, target_height=1080) == (1906, 1080)
+    assert output_size(854, 480, scale=2) == (1708, 960)
+    assert output_size(1280, 720, target_height=1080, multiple=16) == (1920, 1088)
+    for name, nid in (("seedvr2_3b", "66:57"), ("flashvsr_1_3b", "3")):
+        prof = load_profile(name)
+        assert prof.resize.node_id == nid
+        wf = patch_workflow(prof, "vsr/x.mp4", "vsr/x", 1, (1906, 1080))
+        assert wf[nid]["inputs"]["resize_type.width"] == 1906
+        assert wf[nid]["inputs"]["resize_type.height"] == 1080
+        assert wf[nid]["inputs"]["resize_type"] == "scale dimensions"

@@ -103,9 +103,17 @@ def test_server_down(clip, tmp_path, capsys):
 
 def test_cli_against_mock(clip, mock, tmp_path, capsys):
     rc = cli.main(["run", str(clip), "--profile", "seedvr2_3b", "--server", mock.url, "--frames", "41",
+                   "--height", "240",  # the mock returns its input: 320x240
                    "--jobs-dir", str(tmp_path / "jobs"), "--out", str(tmp_path)])
     assert rc == 0, capsys.readouterr().err
     assert probe(tmp_path / "clip_seedvr2_3b_320x240.mov").frame_count == 100
+    resize = mock.prompts[0]["66:57"]["inputs"]
+    assert (resize["resize_type.width"], resize["resize_type.height"]) == (320, 240)
+
+    # the size check catches a workflow that doesn't produce the requested size
+    rc = cli.main(["run", str(clip), "--profile", "seedvr2_3b", "--server", mock.url, "--frames", "41",
+                   "--jobs-dir", str(tmp_path / "jobs2"), "--out", str(tmp_path)])
+    assert rc == 1 and "model output is 320x240, expected 1440x1080" in capsys.readouterr().err
 
 
 def test_cancel_only_touches_our_prompt(client, mock):

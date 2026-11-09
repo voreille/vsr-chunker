@@ -43,6 +43,14 @@ chunk:
 
 Seed fields (`seed`, `noise_seed`) are detected and set to one fixed seed per job.
 
+Optional `resize:` section: the node whose width/height fields set the output size. The tool fills
+them from `--height N` (default 1080, width from the source aspect ratio) or `--scale F`, rounded to
+`multiple` (2 by default; 16 for FlashVSR):
+
+```yaml
+resize: { node_id: "66:57", width_field: "resize_type.width", height_field: "resize_type.height", multiple: 2 }
+```
+
 If a model's output lags its input (output frame n shows input frame n-k), set
 `output.frame_delay: k`: the tool sends extra frames and drops the first k output frames
 (the FlashVSR profile uses 1).
@@ -50,6 +58,8 @@ If a model's output lags its input (output frame n shows input frame n-k), set
 ## Examples
 
 ```
+vsr run clip.mp4 --profile seedvr2_3b                 # 1080p output (default)
+vsr run clip.mp4 --profile seedvr2_3b --height 1440   # or --scale 2
 uv run vsr run clip.mp4 --profile seedvr2_3b                      # real run, master next to clip.mp4
 uv run vsr run clip.mp4 --profile seedvr2_3b --range 10-14 --seed 42 --server http://127.0.0.1:8188
 uv run vsr run clip.mp4 --profile seedvr2_3b --dry-run

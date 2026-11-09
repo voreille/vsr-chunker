@@ -23,13 +23,15 @@
   "3": {
     "class_type": "ResizeImageMaskNode",
     "inputs": {
-      "resize_type": "scale by multiplier",
-      "resize_type.multiplier": 2,
+      "resize_type": "scale dimensions",
       "scale_method": "lanczos",
       "input": [
         "2",
         0
-      ]
+      ],
+      "resize_type.width": 1920,
+      "resize_type.height": 1080,
+      "resize_type.crop": "disabled"
     },
     "_meta": {
       "title": "Resize x2 (LQ input at target size)"
@@ -39,7 +41,7 @@
     "class_type": "GetImageSizeAndCount",
     "inputs": {
       "image": [
-        "16",
+        "3",
         0
       ]
     },
@@ -250,26 +252,6 @@
     },
     "_meta": {
       "title": "Save Video"
-    }
-  },
-  "16": {
-    "class_type": "ImageResizeKJv2",
-    "_meta": {
-      "title": "Round size down to a multiple of 16 (FlashVSR)"
-    },
-    "inputs": {
-      "image": [
-        "3",
-        0
-      ],
-      "width": 0,
-      "height": 0,
-      "upscale_method": "lanczos",
-      "keep_proportion": "stretch",
-      "pad_color": "0, 0, 0",
-      "crop_position": "center",
-      "divisible_by": 16,
-      "device": "cpu"
     }
   }
 }
