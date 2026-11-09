@@ -243,6 +243,44 @@ def cmd_inspect(args) -> int:
     return 0
 
 
+def cmd_detect_res(args) -> int:
+    from .detect import LIKELY, POSSIBLE, DetectError, detect, sample_frames, write_crops
+
+    check_tools()
+    info = probe(args.video)
+    start_s, end_s = parse_range(args.range) if args.range else (0.0, None)
+    try:
+        frames, times = sample_frames(info, args.frames, start_s, end_s)
+        d = detect(frames)
+    except DetectError as e:
+        raise CliError(str(e)) from None
+    h, s = d.best
+    print(f"source     {info.width}x{info.height}, {d.frames} sample frames, heights "
+          f"{d.heights[-1]}..{d.heights[0]} tested")
+    print("peaks      " + ", ".join(f"{ph} ({ps:.2f} dB)" for ph, ps in d.peaks(3))
+          + f"   [>= {LIKELY}: upscaled, >= {POSSIBLE}: probably, native footage stays below ~0.55]")
+    if s >= POSSIBLE:
+        sure = "looks upscaled" if s >= LIKELY else "probably upscaled"
+        print(f"verdict    {sure} from {h} lines; try:  vsr run {shlex.quote(args.video)} --profile <p> --prescale {h}")
+    else:
+        print("verdict    no sign of upscaling: the clip looks native, or was upscaled with a soft or unusual "
+              "filter / heavily re-encoded. Check the crops by eye; don't --prescale on this basis alone.")
+    if not args.no_crops:
+        src = Path(info.path).resolve()
+        dst = Path(args.crops) if args.crops else src.with_name(f"{src.stem}_detect-res.png")
+        try:
+            shown = write_crops(info, frames, times, d, str(dst))
+        except DetectError as e:
+            raise CliError(str(e)) from None
+        print(f"crops      {dst}\n           source vs round trip through {', '.join(f'{x}p' for x in shown)} "
+              "(2x zoom): if a height looks the same as the source, the clip has no more detail than that")
+    if args.verbose:
+        print("\n  height  round-trip PSNR  sharpness")
+        for hh, db, sh in zip(d.heights, d.psnr, d.sharpness):
+            print(f"  {hh:>6}  {db:12.2f} dB  {sh:7.2f}")
+    return 0
+
+
 def cmd_run(args) -> int:
     check_tools()
     info = probe(args.video)
@@ -411,6 +449,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--redo", help="reprocess these chunks, e.g. 3,7 or 2-5")
     p.add_argument("--jobs-dir", default=str(JOBS_DIR))
     p.set_defaults(func=cmd_resume)
+
+    p = sub.add_parser("detect-res", help="estimate a source's real resolution (was it upscaled?)")
+    p.add_argument("video")
+    p.add_argument("--frames", type=int, default=12, help="sample frames (default 12)")
+    p.add_argument("--range", help="only sample START-END seconds, e.g. 10-30")
+    p.add_argument("-v", "--verbose", action="store_true", help="print the PSNR for every tested height")
+    p.add_argument("--crops", metavar="PNG", help="where to write the comparison image "
+                   "(default: <video_stem>_detect-res.png next to the video)")
+    p.add_argument("--no-crops", action="store_true", help="don't write the comparison image")
+    p.set_defaults(func=cmd_detect_res)
 
     p = sub.add_parser("status", help="show a job's chunk states")
     p.add_argument("job_id")

@@ -2,13 +2,27 @@
 
 ## Current milestone: 4 done (manifest, resume, redo, status, ETA) + FlashVSR profile + output size. Next: milestone 5.
 
+### Done (session 2026-11-10, detect-res)
+- `vsr detect-res <video> [--frames 12] [--range] [-v]` (`vsr/detect.py`): for every even height in
+  0.3H..0.92H, Lanczos round-trip of sample luma frames; a clip upscaled from h0 shows a sharp
+  PSNR peak exactly at h0. Score = peak height above its +-4 px neighbours (dB); >= 1.0 upscaled,
+  >= 0.6 probably. Calibrated on 2 real clips + 8 controls (600/540/480/432/360, bicubic/bilinear/
+  Lanczos, crf 20-28): true height always the top peak; bilinear only 0.64-0.81; native <= 0.52
+  (a recurring bump at exactly 3/4 height). Both of the user's real clips: no sign of upscaling.
+- Rejected approaches (smooth MSE-curve knee, spectral cutoff, PSNR threshold): no separation.
+- Not detected: horizontal-only (anamorphic) upscales, upscale + sharpening, heavy re-encodes.
+- Writes `<stem>_detect-res.png` next to the video (`--crops PATH`, `--no-crops`): the most detailed
+  1:1 crop (avoiding near-white subtitles/logos) vs Lanczos round trips through 5 heights, 2x zoom.
+  Masking subtitles in the detection itself was tried and lost every control (their scaled text
+  carried the signal), so subtitles burned in after an upscale can make a clip look native.
+
 ### Done (session 2026-11-10, prescale)
 - `vsr run --prescale HEIGHT`: chunks are downscaled while cutting (`ffmpeg.prescale_filter`, Lanczos,
   antialiased) for sources whose real detail is below their pixel size. `--scale` is relative to the
   prescaled size; the output width always follows the source aspect (no 1922x1080). Cut size checked.
   In the job id. Verified on the server: 1280x720 --prescale 480 -> 1920x1080.
-- Open: last real runs were very slow (7 s/frame for 25 frames at 1080p vs ~1.6 normally) while
-  the disk was full; re-measure now that there is space.
+- Runs at 7 s/frame on 2026-11-09 were caused by the full disk; with space again: 1.5-1.8 s/frame
+  (25 frames, 1080p, SeedVR2 INT8 + fp16 accumulation).
 
 ### Done (session 2026-11-09, output size)
 - Profile `resize:` section (`profiles.Resize`: node_id, width_field, height_field, multiple).
