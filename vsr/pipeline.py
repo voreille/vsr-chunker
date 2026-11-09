@@ -50,6 +50,29 @@ def fake_processor(kind: str, logfile: Path) -> Processor:
     raise PipelineError(f"unknown fake model {kind!r} (use identity or scale2)")
 
 
+def comfy_processor(client, profile, job_id: str, seed: int, *, timeout: float = 3600.0) -> Processor:
+    """Process a chunk through ComfyUI: upload -> patch -> queue -> wait -> download."""
+    from .comfy import ComfyError
+    from .profiles import patch_workflow
+
+    def proc(i: int, src: Path, dst: Path) -> Path:
+        name = f"vsr_{job_id}_{i:03d}{src.suffix}"
+        value = client.upload(src, name=name, subfolder="vsr")
+        wf = patch_workflow(profile, value, f"vsr/vsr_{job_id}_{i:03d}", seed)
+        prompt_id = client.queue(wf)
+        entry = client.wait(prompt_id, timeout=timeout)
+        files = client.outputs(entry, profile.output_node)
+        videos = [f for f in files if Path(f.filename).suffix.lower() in (".mp4", ".mov", ".mkv", ".webm", ".avi")]
+        if len(videos) != 1:
+            raise ComfyError(
+                f"chunk {i}: expected one video from output node {profile.output_node}, got "
+                f"{[(f.kind, f.subfolder, f.filename) for f in files]}"
+            )
+        return client.download(videos[0], dst.with_suffix(Path(videos[0].filename).suffix))
+
+    return proc
+
+
 def fmt_dur(s: float) -> str:
     s = int(round(s))
     return f"{s // 3600}:{s // 60 % 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}"

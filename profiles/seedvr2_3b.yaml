@@ -8,7 +8,12 @@ output:
   node_id: "76"          # SaveVideo
   prefix_field: "filename_prefix"
 # Seed: the KSampler seed ([66:54].seed) is detected and set per job automatically.
-overrides: {}
+overrides:
+  "66:59":               # SeedVR2 Post-Process. The template ships with "none"; the node default
+    color_correction_method: lab   # "lab" measured much less luma drift (+0.7 vs +4.6 levels) here
+  "76":                  # save as ProRes .mov instead of the lossy "auto" (h264) default
+    format: mov
+    format.codec: prores
 chunk:
   frames: 97             # ~3.2 s at 30 fps, ~4 s at 24 fps
   overlap: 8

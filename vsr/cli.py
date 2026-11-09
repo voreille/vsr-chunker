@@ -13,7 +13,8 @@ from pathlib import Path
 
 from . import ffmpeg as ff
 from .plan import Chunk, overlaps, plan_chunks
-from .pipeline import PipelineError, fake_processor, run_ffmpeg, run_job
+from .comfy import ComfyClient, ComfyError, ComfyFatalError
+from .pipeline import PipelineError, comfy_processor, fake_processor, run_ffmpeg, run_job
 from .probe import ProbeError, VideoInfo, check_tools, probe
 from .profiles import PROJECT_ROOT, Profile, ProfileError, describe_workflow, load_profile, load_workflow
 
@@ -203,9 +204,13 @@ def cmd_run(args) -> int:
     if args.dry_run:
         print_dry_run(plan, args)
         return 0
+    client = None
     if not args.fake:
-        raise CliError("ComfyUI processing is not implemented yet (milestone 3). "
-                       "Use --dry-run, or --fake identity|scale2 to test cut/stitch/master.")
+        client = ComfyClient(args.server)
+        stats = client.system_stats()  # fail fast, before cutting anything
+        dev = (stats.get("devices") or [{}])[0]
+        print(f"ComfyUI {stats.get('system', {}).get('comfyui_version', '?')} at {args.server}: "
+              f"{dev.get('name', '?')}, {dev.get('vram_free', 0) / 2**30:.1f} GiB VRAM free", flush=True)
 
     job_dir = Path(args.jobs_dir) / plan.job_id
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -225,11 +230,20 @@ def cmd_run(args) -> int:
     for w in plan.warnings:
         print(f"warning: {w}", flush=True)
     print(f"job {plan.job_id}: {len(plan.chunks)} chunk(s), frames {plan.range_start}.."
-          f"{plan.range_start + plan.range_frames - 1}, fake model '{args.fake}'", flush=True)
+          f"{plan.range_start + plan.range_frames - 1}, "
+          + (f"fake model '{args.fake}'" if args.fake else f"profile {plan.profile.name}, seed {plan.seed}"), flush=True)
     out_dir = Path(args.out) if args.out else Path(info.path).resolve().parent
     master = out_dir / ff.master_output_name(info, plan.profile.name, None, None)
-    run_job(plan, job_dir=job_dir, master_path=master, processor=fake_processor(args.fake, job_dir / "logs" / "model.log"),
-            codec=args.codec, ten_bit=args.ten_bit)
+    if client:
+        processor = comfy_processor(client, plan.profile, plan.job_id, plan.seed, timeout=args.timeout)
+    else:
+        processor = fake_processor(args.fake, job_dir / "logs" / "model.log")
+    try:
+        run_job(plan, job_dir=job_dir, master_path=master, processor=processor,
+                codec=args.codec, ten_bit=args.ten_bit)
+    finally:
+        if client:
+            client.close()
     return 0
 
 
@@ -257,6 +271,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--codec", choices=["dnxhr", "prores"], default="dnxhr", help="master codec")
     p.add_argument("--10bit", dest="ten_bit", action="store_true", help="10-bit master (DNxHR HQX)")
     p.add_argument("--dry-run", action="store_true", help="probe + plan + print commands; don't touch ComfyUI")
+    p.add_argument("--timeout", type=float, default=3600.0, help="max seconds per chunk in ComfyUI (default 3600)")
     p.add_argument("--jobs-dir", default=str(JOBS_DIR), help=f"job state directory (default {JOBS_DIR})")
     p.add_argument("--fake", choices=["identity", "scale2"],
                    help="testing: replace the ComfyUI model with a local fake (copy, or lanczos x2)")
@@ -273,7 +288,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except (CliError, ProbeError, ProfileError, PipelineError) as e:
+    except ComfyFatalError as e:
+        print(f"fatal ComfyUI error: {e}", file=sys.stderr)
+        return 2
+    except (CliError, ProbeError, ProfileError, PipelineError, ComfyError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 

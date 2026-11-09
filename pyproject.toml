@@ -5,6 +5,7 @@ description = "Chunked video upscaling through ComfyUI workflows"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "httpx>=0.28.1",
     "numpy>=2.5.4",
     "pyyaml>=6.0.3",
 ]

@@ -191,3 +191,19 @@ def describe_workflow(wf: dict) -> list[str]:
             else:
                 lines.append(f"    {name} = {val!r}")
     return lines
+
+
+def patch_workflow(profile: Profile, input_value: str, prefix: str, seed: int | None) -> dict:
+    """Return a patched deep copy of the profile's workflow: input filename, output prefix,
+    overrides, and every literal seed field set to ``seed``."""
+    import copy
+
+    wf = copy.deepcopy(profile.workflow)
+    if seed is not None:
+        for nid, f in profile.seed_fields():
+            wf[nid]["inputs"][f] = seed
+    for nid, fields in profile.overrides.items():
+        wf[nid]["inputs"].update(fields)
+    wf[profile.input_node]["inputs"][profile.input_field] = input_value
+    wf[profile.output_node]["inputs"][profile.output_prefix_field] = prefix
+    return wf

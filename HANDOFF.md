@@ -1,6 +1,30 @@
 # HANDOFF
 
-## Current milestone: 2 done (cut + stitch + master, fake models). Next: milestone 3.
+## Current milestone: 3 done (ComfyUI client, real SeedVR2 run). Next: milestone 4.
+
+### Done (session 2026-11-09, milestone 3)
+- `vsr/comfy.py`: httpx client. upload (`/upload/image`, subfolder `vsr`, overwrite), queue
+  (`/prompt`, readable node_errors), wait (polls `/history/{id}`, checks `/queue` every 30 s for a
+  vanished prompt), outputs (any list of `{filename, ...}` under the output node, whatever the key),
+  download (`/view`, streamed, `.part` then rename), free. CUDA-type errors -> `ComfyFatalError`
+  with "ComfyUI must be restarted"; CLI exits 2. Connection refused is fatal too, checked with
+  `/system_stats` before cutting anything.
+- `profiles.patch_workflow`: input value, `vsr/vsr_<job>_<chunk>` prefix, overrides, seed fields.
+- `pipeline.comfy_processor`: upload -> patch -> queue -> wait -> download into `jobs/<id>/out/`
+  (keeps the server's extension). `vsr run` without `--fake` uses it. `--timeout` per chunk.
+- Mock ComfyUI server (`tests/mock_comfy.py`, http.server): upload/prompt/history/queue/view/free,
+  modes ok/cuda/oom/reject/nothing, output under images/gifs/videos. `tests/test_comfy.py`.
+- Real run (ComfyUI 0.44.0): 4 s 854x480 24 fps testsrc2, 3 chunks of 49 -> 1708x960 master,
+  96 frames, ~1:25 per 49-frame chunk. Real history shape: `outputs["76"]["images"] =
+  [{filename, subfolder: "vsr", type: "output", metadata: {frame_count, fps, width, height}}]`
+  plus `"animated": [true]`; status messages execution_start/cached/success.
+- Profile changes: SaveVideo -> `format: mov`, `format.codec: prores` (gives ProRes 4444
+  yuv444p12le, tagged bt709 / transfer sRGB; we tag the master from the source anyway).
+  SeedVR2 Post-Process `color_correction_method: lab` (template had `none`): measured mean drift
+  vs source Y/U/V +4.6/-1.7/-2.8 with none, +0.7/+0.5/+1.2 with lab (PSNR Y 26.4 -> 29.1 dB).
+  The drift is in ComfyUI's raw output; our stitch + master add < 0.2 levels.
+- Matrix check: master vs source 26.4 dB; same master forced through a 709->601 mismatch 19.0 dB,
+  so the color matrix is right.
 
 ### Done (session 2026-11-09, milestone 2)
 - `vsr run ... --fake identity|scale2` runs the whole pipeline without ComfyUI:
@@ -47,20 +71,19 @@
 
 ### Rerun tests
 ```
-uv sync && uv run pytest -q          # 60 tests, ~8 s, needs ffmpeg, no GPU
+uv sync && uv run pytest -q          # 70 tests, ~17 s, needs ffmpeg, no GPU (mock ComfyUI)
 uv run vsr run <clip> --profile seedvr2_3b --dry-run
 uv run vsr run <clip> --profile seedvr2_3b --fake identity --out /tmp/x   # full pipeline, no ComfyUI
+# real end-to-end test: see README "Manual end-to-end test"
 ```
 
-### Next (milestone 3: ComfyUI client + one real profile)
-- `vsr/comfy.py`: upload (`/upload/image`), patch workflow (input file, overrides, seed fields,
-  `vsr_<job>_<chunk>` prefix), `/prompt`, poll `/history/{id}`, download via `/view`, `/free`.
-  Mock server tests (http.server).
-- Implement it as a `Processor` (`pipeline.py`: `(index, in_path, out_path) -> out_path`) and use
-  it in `cmd_run` when `--fake` isn't given. Everything after the processor already works.
-- Inspect a real history entry first (images/gifs/videos keys). Fatal CUDA errors -> stop + tell
-  the user to restart ComfyUI.
-- Manual e2e: 3-5 s clip through seedvr2_3b, document in README.
+### Next (milestone 4: manifest / resume / ETA)
+- `jobs/<id>/manifest.json`: per-chunk status pending/running/done/failed, paths, durations,
+  checksums (input chunk + output). Rerun skips `done` chunks whose files still match.
+  `--redo 3,7`. `vsr resume <job_id>` / `vsr status <job_id>` (store the run args in the manifest).
+- ETA exists already (mean chunk time x remaining); make it weight by frames.
+- A failed chunk currently stops the whole job. With the manifest: non-fatal error -> mark failed,
+  continue or stop (decide); ComfyFatalError -> always stop.
 
 ### Notes / open questions
 - System ffmpeg is 4.4 (Ubuntu 22.04): no `-fps_mode`; `ffmpeg.vsync()` picks `-vsync` on < 5.1.
@@ -71,7 +94,7 @@ uv run vsr run <clip> --profile seedvr2_3b --fake identity --out /tmp/x   # full
 - ComfyUI 0.44.0 reachable at http://127.0.0.1:8188 from this environment (checked
   /system_stats, /queue, /history). History was empty, so the real output-entry shape
   (`images`/`gifs`/`videos`) still has to be checked on a real run in milestone 3.
-- SaveVideo (node 76) uses format/codec `auto` (likely lossy h264). Its schema offers other codecs
-  (ProRes -> MOV). In milestone 3, consider an override for a higher-quality output codec.
-- The SeedVR2 workflow has LoadVideo -> GetVideoComponents -> CreateVideo with the input fps; check
-  that the output frame count equals the input (the 4n+1 rule is assumed from the model).
+- For the user: chunk uploads pile up in ComfyUI `input/vsr/` and outputs in `output/vsr/` (no
+  delete endpoint). Clean them by hand. They also appear in LoadVideo's file list in the UI.
+- SeedVR2 is slow here: ~1.7 s/frame at 1708x960 (tiled VAE, INT8). Not investigated.
+- Not tested on a real server yet: the CUDA-crash path (only via the mock) and long chunks.
