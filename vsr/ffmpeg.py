@@ -65,6 +65,11 @@ def cfr_command(src: str | Path, dst: str | Path, fps: Fraction, codec: ChunkCod
     ]
 
 
+def prescale_filter(w: int, h: int) -> str:
+    """Antialiased downscale (swscale widens the Lanczos kernel by the scale factor)."""
+    return f"scale={w}:{h}:flags=lanczos+accurate_rnd+full_chroma_int"
+
+
 def cut_command(
     src: str | Path,
     dst: str | Path,
@@ -72,10 +77,13 @@ def cut_command(
     length: int,
     pad: int = 0,
     codec: ChunkCodec = DEFAULT_CHUNK_CODEC,
+    prescale: tuple[int, int] | None = None,
 ) -> list[str]:
     """Frame-accurate cut of frames [start, start+length) by frame number, plus ``pad``
-    copies of the last frame."""
+    copies of the last frame, optionally downscaled to ``prescale`` (w, h) first."""
     vf = f"trim=start_frame={start}:end_frame={start + length},setpts=PTS-STARTPTS"
+    if prescale:
+        vf += f",{prescale_filter(*prescale)}"
     if pad:
         vf += f",tpad=stop_mode=clone:stop={pad}"
     return [

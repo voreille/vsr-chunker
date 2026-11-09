@@ -60,3 +60,26 @@ def test_output_size_options(clip, capsys, tmp_path):
     assert "fixed by the workflow" in capsys.readouterr().out
     assert main(["run", str(clip), "--profile", str(tmp_path / "noresize.yaml"), "--dry-run", "--height", "720"]) == 1
     assert "no 'resize' section" in capsys.readouterr().err
+
+
+def test_prescale(clip, capsys, tmp_path):
+    assert main(["run", str(clip), "--profile", "seedvr2_3b", "--dry-run", "--prescale", "120", "--scale", "2"]) == 0
+    out = capsys.readouterr().out
+    assert "prescale   320x240 -> 160x120" in out and "size       320x240" in out
+    assert "scale=160:120:flags=lanczos" in out
+    # width follows the source aspect, not the rounded prescale size (1280x720 -> 854x480 -> 1920x1080)
+    from vsr.cli import build_parser, build_plan
+    from vsr.probe import probe as _probe
+    import dataclasses
+    info = dataclasses.replace(_probe(clip), width=1280, height=720)
+    args = build_parser().parse_args(["run", str(clip), "--profile", "seedvr2_3b", "--prescale", "480"])
+    plan = build_plan(args, info)
+    assert plan.prescale == (854, 480) and plan.out_size == (1920, 1080)
+    assert main(["run", str(clip), "--profile", "seedvr2_3b", "--dry-run", "--prescale", "240"]) == 1
+    assert "must be below the source height" in capsys.readouterr().err
+    # identity fake model: the master has the prescaled size and all frames
+    assert main(["run", str(clip), "--profile", "seedvr2_3b", "--fake", "identity", "--prescale", "120", "--codec", "prores",  # dnxhd needs >= 256 px wide
+                 "--out", str(tmp_path), "--jobs-dir", str(tmp_path / "jobs")]) == 0
+    from vsr.probe import probe
+    m = probe(tmp_path / "clip_seedvr2_3b_160x120.mov")
+    assert m.frame_count == 100 and (m.width, m.height) == (160, 120)

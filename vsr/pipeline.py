@@ -141,11 +141,15 @@ def run_job(plan, *, job_dir: Path, master_path: Path, processor: Processor,
         c = plan.chunks[i]
         dst = chunks_dir / f"chunk_{i:03d}{ext}"
         extra = model_len[i] - c.padded_length
-        run_ffmpeg(ff.cut_command(plan.frame_source, dst, plan.range_start + c.start, c.length, c.pad + extra),
+        run_ffmpeg(ff.cut_command(plan.frame_source, dst, plan.range_start + c.start, c.length, c.pad + extra,
+                                    prescale=plan.prescale),
                    logs / "cut.log", f"cutting chunk {i}")
-        got = probe(dst).frame_count
-        if got != model_len[i]:
-            raise PipelineError(f"chunk {i}: cut produced {got} frames, expected {model_len[i]}")
+        ci = probe(dst)
+        if ci.frame_count != model_len[i]:
+            raise PipelineError(f"chunk {i}: cut produced {ci.frame_count} frames, expected {model_len[i]}")
+        if plan.prescale and (ci.width, ci.height) != tuple(plan.prescale):
+            raise PipelineError(f"chunk {i}: cut is {ci.width}x{ci.height}, expected prescale "
+                                f"{plan.prescale[0]}x{plan.prescale[1]}")
         m.mark_input(i, dst)
         inputs[i] = dst
     if todo:

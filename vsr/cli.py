@@ -56,13 +56,14 @@ class RunPlan:
     warnings: list[str]
     frame_source: str  # file the chunks are cut from (the source, or its CFR conversion)
     out_size: tuple[int, int] | None = None  # (w, h) set in the workflow; None: the model's native factor
+    prescale: tuple[int, int] | None = None  # (w, h) chunks are downscaled to before the model
 
 
 DEFAULT_HEIGHT = 1080
 
 
 def make_job_id(info: VideoInfo, profile: Profile, frames: int, overlap: int, rs: int, rn: int, seed: int | None,
-                size: tuple[int, int] | None = None) -> str:
+                size: tuple[int, int] | None = None, prescale: tuple[int, int] | None = None) -> str:
     src = Path(info.path).resolve()
     st = src.stat()
     key = f"{src}|{st.st_size}|{st.st_mtime_ns}|{profile.name}|{frames}|{overlap}|{rs}|{rn}|{seed}"
@@ -70,6 +71,8 @@ def make_job_id(info: VideoInfo, profile: Profile, frames: int, overlap: int, rs
         key += f"|delay{profile.frame_delay}"
     if size:
         key += f"|{size[0]}x{size[1]}"
+    if prescale:
+        key += f"|pre{prescale[0]}x{prescale[1]}"
     return f"{src.stem[:40]}_{profile.name}_{hashlib.sha1(key.encode()).hexdigest()[:8]}"
 
 
@@ -111,19 +114,28 @@ def build_plan(args, info: VideoInfo | None = None, frames_info: VideoInfo | Non
         warnings.append(f"overlap={overlap} is small; diffusion models need a crossfade of several frames")
 
     height, scale = getattr(args, "height", None), getattr(args, "scale", None)
+    pre_h = getattr(args, "prescale", None)
+    prescale = None
+    if pre_h:
+        if pre_h >= fsrc.height:
+            raise CliError(f"--prescale {pre_h} must be below the source height ({fsrc.height}); "
+                           "it shrinks the source to its real resolution before the model")
+        prescale = output_size(fsrc.width, fsrc.height, target_height=pre_h, multiple=2)  # yuv420p chunks: even
+    in_h = prescale[1] if prescale else fsrc.height  # what the model gets
     size = None
     if profile.resize:
-        size = output_size(fsrc.width, fsrc.height, target_height=height or DEFAULT_HEIGHT, scale=scale,
-                           multiple=profile.resize.multiple)
+        # --scale is relative to the model input; the width always follows the source aspect ratio
+        target = in_h * scale if scale else (height or DEFAULT_HEIGHT)
+        size = output_size(fsrc.width, fsrc.height, target_height=target, multiple=profile.resize.multiple)
         if size[1] < fsrc.height:
             warnings.append(f"output {size[0]}x{size[1]} is smaller than the source {fsrc.width}x{fsrc.height}")
     elif height or scale:
         raise CliError(f"profile {profile.name} has no 'resize' section, so --height/--scale can't be applied "
                        "(its output size is fixed by the workflow)")
 
-    job_id = make_job_id(info, profile, frames, overlap, rs, rn, args.seed, size)
+    job_id = make_job_id(info, profile, frames, overlap, rs, rn, args.seed, size, prescale)
     seed = args.seed if args.seed is not None else int(job_id.rsplit("_", 1)[1], 16) % 2**31
-    return RunPlan(info, profile, rs, rn, chunks, frames, overlap, seed, job_id, warnings, fsrc.path, size)
+    return RunPlan(info, profile, rs, rn, chunks, frames, overlap, seed, job_id, warnings, fsrc.path, size, prescale)
 
 
 def _fmt_tc(frame: int, fps: Fraction) -> str:
@@ -156,6 +168,8 @@ def print_dry_run(p: RunPlan, args) -> None:
     out(f"  workflow   {prof.workflow_path}")
     wf = prof.workflow
     out(f"  input      [{prof.input_node}] {wf[prof.input_node]['class_type']}.{prof.input_field}")
+    if p.prescale:
+        out(f"  prescale   {info.width}x{info.height} -> {p.prescale[0]}x{p.prescale[1]} (lanczos, before the model)")
     if p.out_size:
         rz = prof.resize
         out(f"  size       {p.out_size[0]}x{p.out_size[1]} -> [{rz.node_id}] {wf[rz.node_id]['class_type']}."
@@ -199,7 +213,9 @@ def print_dry_run(p: RunPlan, args) -> None:
         src = str(cfr)
     for i, c in enumerate(p.chunks):
         dst = job_dir / "chunks" / f"chunk_{i:03d}{ff.DEFAULT_CHUNK_CODEC.ext}"
-        out("  " + shlex.join(ff.cut_command(src, dst, p.range_start + c.start, c.length, c.pad)))
+        extra = delay_extra(c.padded_length, prof.frame_delay, prof.frame_multiple)
+        out("  " + shlex.join(ff.cut_command(src, dst, p.range_start + c.start, c.length, c.pad + extra,
+                                             prescale=p.prescale)))
     out("  # ... upload / queue / download each chunk via ComfyUI, then decode each output to")
     out(f"  # {ff.STITCH_PIX_FMT}, crossfade the overlaps (numpy, streamed), drop pad frames, and pipe into:")
     out_dir = Path(args.out) if args.out else Path(info.path).resolve().parent
@@ -287,7 +303,7 @@ def cmd_run(args) -> int:
 
 # Arguments of `vsr run` stored in the manifest, so `vsr resume <id>` can replay them.
 RUN_ARG_KEYS = ("video", "profile", "out", "server", "seed", "frames", "overlap", "range",
-                "height", "scale", "codec", "ten_bit", "timeout", "fake")
+                "height", "scale", "prescale", "codec", "ten_bit", "timeout", "fake")
 
 
 def run_args_record(args) -> dict:
@@ -373,7 +389,11 @@ def build_parser() -> argparse.ArgumentParser:
     size = p.add_mutually_exclusive_group()
     size.add_argument("--height", type=int, help=f"output height in pixels, width from the aspect ratio "
                       f"(default {DEFAULT_HEIGHT}; profiles with a 'resize' section)")
-    size.add_argument("--scale", type=float, help="output size as a factor of the source, e.g. 1.5")
+    size.add_argument("--scale", type=float, help="output size as a factor of the model input "
+                      "(the source, or its --prescale size), e.g. 1.5")
+    p.add_argument("--prescale", type=int, metavar="HEIGHT",
+                   help="first downscale the source to this height (antialiased Lanczos), for sources "
+                        "whose real detail is lower than their pixel size (e.g. 480p upscaled to 720p)")
     p.add_argument("--codec", choices=["dnxhr", "prores"], default="dnxhr", help="master codec")
     p.add_argument("--10bit", dest="ten_bit", action="store_true", help="10-bit master (DNxHR HQX)")
     p.add_argument("--dry-run", action="store_true", help="probe + plan + print commands; don't touch ComfyUI")

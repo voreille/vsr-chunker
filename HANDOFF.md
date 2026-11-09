@@ -2,6 +2,14 @@
 
 ## Current milestone: 4 done (manifest, resume, redo, status, ETA) + FlashVSR profile + output size. Next: milestone 5.
 
+### Done (session 2026-11-10, prescale)
+- `vsr run --prescale HEIGHT`: chunks are downscaled while cutting (`ffmpeg.prescale_filter`, Lanczos,
+  antialiased) for sources whose real detail is below their pixel size. `--scale` is relative to the
+  prescaled size; the output width always follows the source aspect (no 1922x1080). Cut size checked.
+  In the job id. Verified on the server: 1280x720 --prescale 480 -> 1920x1080.
+- Open: last real runs were very slow (7 s/frame for 25 frames at 1080p vs ~1.6 normally) while
+  the disk was full; re-measure now that there is space.
+
 ### Done (session 2026-11-09, output size)
 - Profile `resize:` section (`profiles.Resize`: node_id, width_field, height_field, multiple).
   `vsr run --height N` (default 1080) / `--scale F` -> `profiles.output_size()` -> patched into the
