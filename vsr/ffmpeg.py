@@ -44,6 +44,19 @@ def fps_str(fps: Fraction) -> str:
     return f"{fps.numerator}/{fps.denominator}"
 
 
+STANDARD_RATES = [Fraction(24000, 1001), Fraction(24), Fraction(25), Fraction(30000, 1001), Fraction(30),
+                  Fraction(48), Fraction(50), Fraction(60000, 1001), Fraction(60)]
+
+
+def cfr_target_fps(avg: Fraction) -> Fraction:
+    """Constant rate for a VFR source: the nearest standard rate within 2%, else ``avg``
+    rounded to 3 decimals."""
+    best = min(STANDARD_RATES, key=lambda r: abs(r - avg))
+    if abs(best - avg) / avg <= Fraction(2, 100):
+        return best
+    return Fraction(round(avg * 1000), 1000)
+
+
 def cfr_command(src: str | Path, dst: str | Path, fps: Fraction, codec: ChunkCodec = DEFAULT_CHUNK_CODEC) -> list[str]:
     """Convert a VFR source to constant frame rate (video only, lossless intermediate)."""
     return [
@@ -70,6 +83,47 @@ def cut_command(
         "-vf", vf, *vsync("passthrough"), "-frames:v", str(length + pad),
         *codec.args, str(dst),
     ]
+
+
+# --- decode for stitching ------------------------------------------------------
+
+# Planar 4:2:2 16-bit: every master codec is 4:2:2, so the only chroma resampling happens when
+# decoding the model output (blending in YUV needs no matrix conversion; it's linear either way).
+STITCH_PIX_FMT = "yuv422p16le"
+
+
+def stitch_frame_samples(width: int, height: int) -> int:
+    """uint16 samples per STITCH_PIX_FMT frame (Y + two half-width chroma planes)."""
+    return width * height + 2 * ((width + 1) // 2) * height
+
+_MATRIX = {"bt709": "bt709", "smpte170m": "bt601", "bt470bg": "bt601", "fcc": "fcc",
+           "smpte240m": "smpte240m", "bt2020nc": "bt2020", "bt2020c": "bt2020"}
+
+
+def decode_command(src: str | Path, info: VideoInfo | None = None, pix_fmt: str = STITCH_PIX_FMT) -> list[str]:
+    """Decode a video to raw frames on stdout. If the source tags are known, pin the YUV
+    matrix/range so an RGB model output is converted back with the source's matrix
+    (swscale would otherwise default to bt601)."""
+    vf = []
+    if info is not None:
+        opts = []
+        if info.color_space in _MATRIX:
+            opts.append(f"out_color_matrix={_MATRIX[info.color_space]}")
+        if info.color_range in ("tv", "pc"):
+            opts.append(f"out_range={info.color_range}")
+        if opts:
+            vf = ["-vf", "scale=" + ":".join(opts)]
+    return ["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-i", str(src), "-map", "0:v:0",
+            *vf, *vsync("passthrough"), "-f", "rawvideo", "-pix_fmt", pix_fmt, "-"]
+
+
+# --- fake models (tests without ComfyUI) -------------------------------------
+
+def fake_model_command(kind: str, src: str | Path, dst: str | Path, codec: ChunkCodec = DEFAULT_CHUNK_CODEC) -> list[str]:
+    if kind == "scale2":
+        return [*FFMPEG, "-i", str(src), "-vf", "scale=iw*2:ih*2:flags=lanczos", *vsync("passthrough"),
+                *codec.args, str(dst)]
+    raise ValueError(f"unknown fake model {kind!r}")
 
 
 # --- master -----------------------------------------------------------------
@@ -132,8 +186,12 @@ def master_command(
     ten_bit: bool = False,
     range_start_frame: int = 0,
     range_frames: int | None = None,
+    raw: tuple[int, int, str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Encode the stitched ``video`` and mux the source's audio + timecode + color tags.
+
+    With ``raw=(width, height, pix_fmt)``, the video is read as rawvideo from stdin
+    (``video`` is ignored), at the source frame rate.
 
     Returns (argv, warnings)."""
     warnings: list[str] = []
@@ -142,7 +200,11 @@ def master_command(
     except KeyError:
         raise ValueError(f"unknown master codec {codec!r} (use dnxhr or prores)") from None
 
-    cmd = [*FFMPEG, "-i", str(video)]
+    if raw:
+        w, h, pix = raw
+        cmd = [*FFMPEG, "-f", "rawvideo", "-pix_fmt", pix, "-s", f"{w}x{h}", "-r", fps_str(info.fps), "-i", "-"]
+    else:
+        cmd = [*FFMPEG, "-i", str(video)]
     trimmed = range_start_frame != 0 or (range_frames is not None and range_frames != info.frame_count)
     if trimmed:
         start_s = Fraction(range_start_frame) / info.fps

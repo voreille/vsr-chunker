@@ -18,6 +18,7 @@ def test_dry_run(clip, capsys):
     # 100 frames, 97/8 4n+1: [0..96] and [89..99] (11 frames + 2 pad = 13)
     assert "2 chunk(s)" in out
     assert "trim=start_frame=89:end_frame=100,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop=2" in out
+    assert "-f rawvideo -pix_fmt yuv422p16le -s WxH" in out
 
 
 def test_dry_run_range_and_overrides(clip, capsys):

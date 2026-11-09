@@ -82,3 +82,9 @@ def test_zero_overlap():
 def test_invalid(total, frames, overlap, fm):
     with pytest.raises(ValueError):
         plan_chunks(total, frames, overlap, fm)
+
+
+def test_chunk_must_hold_two_overlaps():
+    with pytest.raises(ValueError, match="2 x overlap"):
+        plan_chunks(100, 13, 8, "4n+1")
+    assert plan_chunks(10, 13, 8, "4n+1") == [Chunk(0, 10, 3)]  # single chunk: no crossfade, fine

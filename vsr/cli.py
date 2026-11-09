@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import shlex
 import sys
@@ -12,6 +13,7 @@ from pathlib import Path
 
 from . import ffmpeg as ff
 from .plan import Chunk, overlaps, plan_chunks
+from .pipeline import PipelineError, fake_processor, run_ffmpeg, run_job
 from .probe import ProbeError, VideoInfo, check_tools, probe
 from .profiles import PROJECT_ROOT, Profile, ProfileError, describe_workflow, load_profile, load_workflow
 
@@ -50,6 +52,7 @@ class RunPlan:
     seed: int
     job_id: str
     warnings: list[str]
+    frame_source: str  # file the chunks are cut from (the source, or its CFR conversion)
 
 
 def make_job_id(info: VideoInfo, profile: Profile, frames: int, overlap: int, rs: int, rn: int, seed: int | None) -> str:
@@ -59,23 +62,27 @@ def make_job_id(info: VideoInfo, profile: Profile, frames: int, overlap: int, rs
     return f"{src.stem[:40]}_{profile.name}_{hashlib.sha1(key.encode()).hexdigest()[:8]}"
 
 
-def build_plan(args) -> RunPlan:
-    info = probe(args.video)
+def build_plan(args, info: VideoInfo | None = None, frames_info: VideoInfo | None = None) -> RunPlan:
+    """``info`` is the source (audio, timecode, color). ``frames_info`` is the file chunks are
+    cut from, when it differs (CFR conversion of a VFR source)."""
+    info = info or probe(args.video)
     profile = load_profile(args.profile)
     warnings = list(info.warnings)
+    fsrc = frames_info or info
 
     frames = args.frames if args.frames is not None else profile.frames
     overlap = args.overlap if args.overlap is not None else profile.overlap
 
-    rs, rn = 0, info.frame_count
+    total = fsrc.frame_count
+    rs, rn = 0, total
     if args.range:
         start_s, end_s = parse_range(args.range)
-        rs = info.frame_at(start_s)
-        re_ = info.frame_count if end_s is None else min(info.frame_at(end_s), info.frame_count)
-        if rs >= info.frame_count:
+        rs = fsrc.frame_at(start_s)
+        re_ = total if end_s is None else min(fsrc.frame_at(end_s), total)
+        if rs >= total:
             raise CliError(f"--range start {start_s}s is past the end of the clip ({info.duration:.3f}s)")
-        if end_s is not None and info.frame_at(end_s) > info.frame_count:
-            warnings.append(f"--range end {end_s}s is past the end of the clip; clamped to {info.frame_count} frames")
+        if end_s is not None and fsrc.frame_at(end_s) > total:
+            warnings.append(f"--range end {end_s}s is past the end of the clip; clamped to {total} frames")
         rn = re_ - rs
 
     try:
@@ -94,7 +101,7 @@ def build_plan(args) -> RunPlan:
 
     job_id = make_job_id(info, profile, frames, overlap, rs, rn, args.seed)
     seed = args.seed if args.seed is not None else int(job_id.rsplit("_", 1)[1], 16) % 2**31
-    return RunPlan(info, profile, rs, rn, chunks, frames, overlap, seed, job_id, warnings)
+    return RunPlan(info, profile, rs, rn, chunks, frames, overlap, seed, job_id, warnings, fsrc.path)
 
 
 def _fmt_tc(frame: int, fps: Fraction) -> str:
@@ -150,24 +157,26 @@ def print_dry_run(p: RunPlan, args) -> None:
     out(f"  {len(p.chunks)} chunk(s), overlaps {sorted(set(ov)) if ov else '-'}, "
         f"{sent} frames sent to the model ({sent / p.range_frames:.2f}x the range)")
 
-    job_dir = JOBS_DIR / p.job_id
+    job_dir = Path(args.jobs_dir) / p.job_id
     out(f"\n== Commands  (job {p.job_id}, dir {job_dir})")
     src = info.path
     if info.vfr:
         cfr = job_dir / f"source_cfr{ff.DEFAULT_CHUNK_CODEC.ext}"
         out("  # convert VFR source to CFR first")
-        out("  " + shlex.join(ff.cfr_command(src, cfr, fps)))
+        out("  " + shlex.join(ff.cfr_command(src, cfr, ff.cfr_target_fps(fps))))
+        out("  # (chunk plan below is from the VFR packet count; it is recomputed after conversion)")
         src = str(cfr)
     for i, c in enumerate(p.chunks):
         dst = job_dir / "chunks" / f"chunk_{i:03d}{ff.DEFAULT_CHUNK_CODEC.ext}"
         out("  " + shlex.join(ff.cut_command(src, dst, p.range_start + c.start, c.length, c.pad)))
-    out("  # ... upload / queue / download each chunk via ComfyUI, then crossfade-stitch to:")
-    stitched = job_dir / "stitched.mkv"
+    out("  # ... upload / queue / download each chunk via ComfyUI, then decode each output to")
+    out(f"  # {ff.STITCH_PIX_FMT}, crossfade the overlaps (numpy, streamed), drop pad frames, and pipe into:")
     out_dir = Path(args.out) if args.out else Path(info.path).resolve().parent
     master = out_dir / ff.master_output_name(info, prof.name, None, None)
     cmd, mw = ff.master_command(
-        stitched, info, master, codec=args.codec, ten_bit=args.ten_bit,
+        None, info, master, codec=args.codec, ten_bit=args.ten_bit,
         range_start_frame=p.range_start, range_frames=p.range_frames,
+        raw=("W", "H", ff.STITCH_PIX_FMT),
     )
     p.warnings.extend(mw)
     out("  " + shlex.join(cmd))
@@ -189,11 +198,39 @@ def cmd_inspect(args) -> int:
 
 def cmd_run(args) -> int:
     check_tools()
-    plan = build_plan(args)
+    info = probe(args.video)
+    plan = build_plan(args, info)
     if args.dry_run:
         print_dry_run(plan, args)
         return 0
-    raise CliError("processing is not implemented yet (milestone 2+). Use --dry-run.")
+    if not args.fake:
+        raise CliError("ComfyUI processing is not implemented yet (milestone 3). "
+                       "Use --dry-run, or --fake identity|scale2 to test cut/stitch/master.")
+
+    job_dir = Path(args.jobs_dir) / plan.job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    if info.vfr:
+        target = ff.cfr_target_fps(info.fps)
+        cfr = job_dir / f"source_cfr{ff.DEFAULT_CHUNK_CODEC.ext}"
+        print(f"warning: variable frame rate source; converting to CFR {ff.fps_str(target)} "
+              f"({float(target):.3f} fps) -> {cfr}", flush=True)
+        (job_dir / "logs").mkdir(exist_ok=True)
+        run_ffmpeg(ff.cfr_command(info.path, cfr, target), job_dir / "logs" / "cfr.log", "CFR conversion")
+        # audio/timecode/color still come from the original file; frames and fps from the CFR copy
+        cfr_info = dataclasses.replace(info, fps=target, vfr=False, warnings=[])
+        replanned = build_plan(args, cfr_info, probe(cfr))
+        replanned.job_id, replanned.seed = plan.job_id, plan.seed  # keep the id of the source job
+        plan = replanned
+
+    for w in plan.warnings:
+        print(f"warning: {w}", flush=True)
+    print(f"job {plan.job_id}: {len(plan.chunks)} chunk(s), frames {plan.range_start}.."
+          f"{plan.range_start + plan.range_frames - 1}, fake model '{args.fake}'", flush=True)
+    out_dir = Path(args.out) if args.out else Path(info.path).resolve().parent
+    master = out_dir / ff.master_output_name(info, plan.profile.name, None, None)
+    run_job(plan, job_dir=job_dir, master_path=master, processor=fake_processor(args.fake, job_dir / "logs" / "model.log"),
+            codec=args.codec, ten_bit=args.ten_bit)
+    return 0
 
 
 def cmd_not_yet(args) -> int:
@@ -220,6 +257,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--codec", choices=["dnxhr", "prores"], default="dnxhr", help="master codec")
     p.add_argument("--10bit", dest="ten_bit", action="store_true", help="10-bit master (DNxHR HQX)")
     p.add_argument("--dry-run", action="store_true", help="probe + plan + print commands; don't touch ComfyUI")
+    p.add_argument("--jobs-dir", default=str(JOBS_DIR), help=f"job state directory (default {JOBS_DIR})")
+    p.add_argument("--fake", choices=["identity", "scale2"],
+                   help="testing: replace the ComfyUI model with a local fake (copy, or lanczos x2)")
     p.set_defaults(func=cmd_run)
 
     for name in ("resume", "status"):
@@ -233,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except (CliError, ProbeError, ProfileError) as e:
+    except (CliError, ProbeError, ProfileError, PipelineError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 

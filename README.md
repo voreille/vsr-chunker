@@ -2,7 +2,7 @@
 
 Upscale long videos through ComfyUI workflows (SeedVR2, Wan 2.2, FlashVSR, ...) in overlapping
 chunks, stitch them with crossfades, and write a Resolve-friendly master (DNxHR/ProRes) with the
-original audio and timecode. Status: milestone 1 (probe, chunk plan, `--dry-run`).
+original audio and timecode. Status: milestone 2 (probe, plan, cut, stitch, master; ComfyUI processing not wired yet).
 
 ## Install
 
@@ -48,6 +48,8 @@ Seed fields (`seed`, `noise_seed`) are detected and set to one fixed seed per jo
 ```
 uv run vsr run clip.mp4 --profile seedvr2_3b --dry-run
 uv run vsr run clip.mp4 --profile seedvr2_3b --dry-run --range 10-15 --frames 81 --overlap 8
+# whole pipeline with a fake model instead of ComfyUI (identity copy, or lanczos x2):
+uv run vsr run clip.mp4 --profile seedvr2_3b --fake scale2 --out /tmp/test --10bit
 ```
 
 ## Tests

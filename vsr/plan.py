@@ -102,6 +102,11 @@ def plan_chunks(
         raise ValueError(
             f"chunk length {chunk_len} (frames={frames} rounded to {fm}) must be greater than overlap={overlap}"
         )
+    if total_frames > chunk_len and chunk_len < 2 * overlap:
+        raise ValueError(
+            f"chunk length {chunk_len} must be at least 2 x overlap ({2 * overlap}) so that a chunk's "
+            "two crossfade regions don't overlap each other"
+        )
     stride = chunk_len - overlap
 
     chunks: list[Chunk] = []
