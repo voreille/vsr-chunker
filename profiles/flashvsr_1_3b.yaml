@@ -1,0 +1,23 @@
+# FlashVSR (Wan 2.1 1.3B) x2 via Kijai's ComfyUI-WanVideoWrapper ("barebones" port: no sparse attention).
+# Built from custom_nodes/ComfyUI-WanVideoWrapper/example_workflows/wanvideo_1_3B_FlashVSR_upscale_example.json
+name: flashvsr_1_3b
+workflow: workflows/flashvsr_1_3b_api.json
+input:
+  node_id: "1"           # LoadVideo
+  field: "file"
+output:
+  node_id: "15"          # SaveVideo
+  prefix_field: "filename_prefix"
+  frame_delay: 1         # this port's output lags its input by one frame (measured 2026-11-09);
+                         # the tool sends extra frames and drops the first output frame
+# Seed: WanVideoSampler [11].seed is detected and set per job.
+overrides:
+  "8":                   # WanVideoModelLoader: SageAttention, ~33% faster than sdpa, same output
+    attention_mode: sageattn
+  "15":                  # ProRes .mov instead of lossy auto/h264
+    format: mov
+    format.codec: prores
+chunk:
+  frames: 97
+  overlap: 8
+  frame_multiple: 4n+1   # Wan temporal compression

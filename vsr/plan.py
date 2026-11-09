@@ -123,3 +123,12 @@ def plan_chunks(
 def overlaps(chunks: list[Chunk]) -> list[int]:
     """Number of frames shared between chunk i and chunk i+1."""
     return [a.start + a.length - b.start for a, b in zip(chunks, chunks[1:])]
+
+
+def delay_extra(padded_length: int, delay: int, frame_multiple: FrameMultiple) -> int:
+    """Extra input frames to feed a model whose output lags its input by ``delay`` frames,
+    so that after dropping the first ``delay`` output frames every chunk frame is still there.
+    Keeps the input length valid for ``frame_multiple``."""
+    if delay <= 0:
+        return 0
+    return frame_multiple.round_up(padded_length + delay) - padded_length

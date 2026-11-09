@@ -12,7 +12,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from . import ffmpeg as ff
-from .plan import Chunk, overlaps, plan_chunks
+from .plan import Chunk, delay_extra, overlaps, plan_chunks
 from .comfy import ComfyClient, ComfyError, ComfyFatalError
 from .job import MANIFEST, JobError, Manifest, parse_redo
 from .pipeline import PipelineError, comfy_processor, fake_processor, fmt_dur, run_ffmpeg, run_job
@@ -61,6 +61,8 @@ def make_job_id(info: VideoInfo, profile: Profile, frames: int, overlap: int, rs
     src = Path(info.path).resolve()
     st = src.stat()
     key = f"{src}|{st.st_size}|{st.st_mtime_ns}|{profile.name}|{frames}|{overlap}|{rs}|{rn}|{seed}"
+    if profile.frame_delay:  # changes what is sent to the model (kept out otherwise: stable ids)
+        key += f"|delay{profile.frame_delay}"
     return f"{src.stem[:40]}_{profile.name}_{hashlib.sha1(key.encode()).hexdigest()[:8]}"
 
 
@@ -148,14 +150,17 @@ def print_dry_run(p: RunPlan, args) -> None:
     out("\n== Chunk plan")
     out(f"  range      frames {p.range_start}..{p.range_start + p.range_frames - 1} "
         f"({p.range_frames} frames, {float(p.range_frames / fps):.3f}s)")
-    out(f"  settings   frames={p.frames} overlap={p.overlap} frame_multiple={prof.frame_multiple}")
+    out(f"  settings   frames={p.frames} overlap={p.overlap} frame_multiple={prof.frame_multiple}"
+        + (f" frame_delay={prof.frame_delay} (extra frames sent, first {prof.frame_delay} output frame(s) dropped)"
+           if prof.frame_delay else ""))
+    sent_len = [c.padded_length + delay_extra(c.padded_length, prof.frame_delay, prof.frame_multiple) for c in p.chunks]
     out(f"  {'#':>4} {'start':>7} {'end':>7} {'len':>5} {'pad':>4} {'sent':>5} {'time':>18}")
     for i, c in enumerate(p.chunks):
         a = p.range_start + c.start
-        out(f"  {i:>4} {a:>7} {a + c.length - 1:>7} {c.length:>5} {c.pad:>4} {c.padded_length:>5} "
+        out(f"  {i:>4} {a:>7} {a + c.length - 1:>7} {c.length:>5} {c.pad:>4} {sent_len[i]:>5} "
             f"{_fmt_tc(a, fps):>9}-{_fmt_tc(a + c.length, fps)}")
     ov = overlaps(p.chunks)
-    sent = sum(c.padded_length for c in p.chunks)
+    sent = sum(sent_len)
     out(f"  {len(p.chunks)} chunk(s), overlaps {sorted(set(ov)) if ov else '-'}, "
         f"{sent} frames sent to the model ({sent / p.range_frames:.2f}x the range)")
 
@@ -346,8 +351,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=float, default=3600.0, help="max seconds per chunk in ComfyUI (default 3600)")
     p.add_argument("--jobs-dir", default=str(JOBS_DIR), help=f"job state directory (default {JOBS_DIR})")
     p.add_argument("--redo", help="reprocess these chunks even if done, e.g. 3,7 or 2-5")
-    p.add_argument("--fake", choices=["identity", "scale2"],
-                   help="testing: replace the ComfyUI model with a local fake (copy, or lanczos x2)")
+    p.add_argument("--fake", choices=["identity", "scale2", "delay1"],
+                   help="testing: replace the ComfyUI model with a local fake (copy, lanczos x2, or 1-frame lag)")
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("resume", help="continue a job with its stored arguments (skips done chunks)")

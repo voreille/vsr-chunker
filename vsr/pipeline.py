@@ -11,7 +11,8 @@ from pathlib import Path
 from . import ffmpeg as ff
 from .job import Eta, Manifest, now
 from .probe import ProbeError, VideoInfo, probe
-from .stitch import FrameWriter, StitchError, read_frames, stitch_frames
+from .plan import delay_extra
+from .stitch import FrameWriter, StitchError, read_frames, stitch_frames, window
 
 # processor(index, input_chunk_path, output_path) -> path of the processed chunk
 Processor = Callable[[int, Path, Path], Path]
@@ -46,9 +47,16 @@ def fake_processor(kind: str, logfile: Path) -> Processor:
 
     if kind == "identity":
         return identity
+    def delayed(i: int, src: Path, dst: Path) -> Path:
+        run_ffmpeg(ff.fake_model_command(kind, src, dst, frames=probe(src).frame_count), logfile,
+                   f"fake model {kind} on chunk {i}")
+        return dst
+
     if kind == "scale2":
         return ffmpeg_model
-    raise PipelineError(f"unknown fake model {kind!r} (use identity or scale2)")
+    if kind == "delay1":
+        return delayed
+    raise PipelineError(f"unknown fake model {kind!r} (use identity, scale2 or delay1)")
 
 
 def comfy_processor(client, profile, job_id: str, seed: int, *, timeout: float = 3600.0) -> Processor:
@@ -101,6 +109,10 @@ def run_job(plan, *, job_dir: Path, master_path: Path, processor: Processor,
         d.mkdir(parents=True, exist_ok=True)
     ext = ff.DEFAULT_CHUNK_CODEC.ext
     n = len(plan.chunks)
+    delay = plan.profile.frame_delay
+    fm = plan.profile.frame_multiple
+    # frames fed to / expected back from the model per chunk (more than padded_length if it lags)
+    model_len = [c.padded_length + delay_extra(c.padded_length, delay, fm) for c in plan.chunks]
 
     m = Manifest.open(job_dir, job_id=plan.job_id, args=args_record or {}, chunks=plan.chunks, plan_info={
         "source": info.path, "profile": plan.profile.name, "seed": plan.seed,
@@ -127,11 +139,12 @@ def run_job(plan, *, job_dir: Path, master_path: Path, processor: Processor,
     for i in todo:
         c = plan.chunks[i]
         dst = chunks_dir / f"chunk_{i:03d}{ext}"
-        run_ffmpeg(ff.cut_command(plan.frame_source, dst, plan.range_start + c.start, c.length, c.pad),
+        extra = model_len[i] - c.padded_length
+        run_ffmpeg(ff.cut_command(plan.frame_source, dst, plan.range_start + c.start, c.length, c.pad + extra),
                    logs / "cut.log", f"cutting chunk {i}")
         got = probe(dst).frame_count
-        if got != c.padded_length:
-            raise PipelineError(f"chunk {i}: cut produced {got} frames, expected {c.padded_length}")
+        if got != model_len[i]:
+            raise PipelineError(f"chunk {i}: cut produced {got} frames, expected {model_len[i]}")
         m.mark_input(i, dst)
         inputs[i] = dst
     if todo:
@@ -139,7 +152,7 @@ def run_job(plan, *, job_dir: Path, master_path: Path, processor: Processor,
 
     # 2. process
     eta = Eta()
-    frames_left = sum(plan.chunks[i].padded_length for i in todo)
+    frames_left = sum(model_len[i] for i in todo)
     for k, i in enumerate(todo, 1):
         c = plan.chunks[i]
         m.mark_running(i)
@@ -147,10 +160,11 @@ def run_job(plan, *, job_dir: Path, master_path: Path, processor: Processor,
         try:
             out = processor(i, inputs[i], out_dir / f"chunk_{i:03d}{ext}")
             oi = probe(out)
-            if oi.frame_count != c.padded_length:
+            if oi.frame_count != model_len[i]:
                 raise PipelineError(
-                    f"chunk {i}: model output {out} has {oi.frame_count} frames, expected {c.padded_length} "
-                    f"(source frames {plan.range_start + c.start}..{plan.range_start + c.end}, pad {c.pad})"
+                    f"chunk {i}: model output {out} has {oi.frame_count} frames, expected {model_len[i]} "
+                    f"(source frames {plan.range_start + c.start}..{plan.range_start + c.end}, pad {c.pad}"
+                    + (f", +{model_len[i] - c.padded_length} for frame_delay {delay}" if delay else "") + ")"
                 )
         except ComfyFatalError as e:
             m.mark_failed(i, str(e), time.monotonic() - t)
@@ -158,7 +172,7 @@ def run_job(plan, *, job_dir: Path, master_path: Path, processor: Processor,
         except (ComfyError, PipelineError, ProbeError) as e:
             m.mark_failed(i, str(e), time.monotonic() - t)
             log(f"chunk {i} FAILED: {e}")
-            frames_left -= c.padded_length
+            frames_left -= model_len[i]
             continue
         except BaseException:  # Ctrl-C etc.: leave it to be redone
             m.chunk(i).update(status="pending", error="interrupted")
@@ -166,11 +180,11 @@ def run_job(plan, *, job_dir: Path, master_path: Path, processor: Processor,
             raise
         dt = time.monotonic() - t
         m.mark_done(i, out, frames=oi.frame_count, width=oi.width, height=oi.height, duration=dt)
-        eta.add(c.padded_length, dt)
-        frames_left -= c.padded_length
+        eta.add(model_len[i], dt)
+        frames_left -= model_len[i]
         rem = eta.remaining(frames_left)
-        log(f"chunk {i} ({k}/{len(todo)}): {c.padded_length} frames -> {oi.width}x{oi.height} in {fmt_dur(dt)} "
-            f"({dt / c.padded_length:.2f} s/frame)" + (f", ETA {fmt_dur(rem)}" if frames_left and rem else ""))
+        log(f"chunk {i} ({k}/{len(todo)}): {model_len[i]} frames -> {oi.width}x{oi.height} in {fmt_dur(dt)} "
+            f"({dt / model_len[i]:.2f} s/frame)" + (f", ETA {fmt_dur(rem)}" if frames_left and rem else ""))
 
     failed = [c for c in m.chunks if c["status"] != "done"]
     if failed:
@@ -200,7 +214,9 @@ def run_job(plan, *, job_dir: Path, master_path: Path, processor: Processor,
     t = time.monotonic()
     (logs / "master.log").write_text("$ " + " ".join(cmd) + "\n")
     writer = FrameWriter(cmd, logs / "master.log")
-    readers = (read_frames(ff.decode_command(o, info), ff.stitch_frame_samples(w, h), logs / "decode.log") for o in outputs)
+    samples = ff.stitch_frame_samples(w, h)
+    readers = (window(read_frames(ff.decode_command(o, info), samples, logs / "decode.log"), delay, c.padded_length)
+               for o, c in zip(outputs, plan.chunks))
     try:
         written = stitch_frames(plan.chunks, readers, writer)
         writer.close()

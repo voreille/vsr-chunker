@@ -34,6 +34,7 @@ class Profile:
     frame_multiple: FrameMultiple
     overrides: dict[str, dict] = field(default_factory=dict)
     max_seconds: float | None = None  # warn if a chunk is longer (e.g. SeedVR2 INT8 crash limit)
+    frame_delay: int = 0  # model output frame n shows input frame n - frame_delay (FlashVSR port: 1)
 
     def seed_fields(self) -> list[tuple[str, str]]:
         """(node_id, field) pairs holding a literal seed value in the workflow."""
@@ -154,6 +155,10 @@ def load_profile(name_or_path: str) -> Profile:
     if max_seconds is not None and (not isinstance(max_seconds, (int, float)) or max_seconds <= 0):
         errors.append(f"chunk.max_seconds must be a positive number, got {max_seconds!r}")
 
+    frame_delay = out.get("frame_delay", 0)
+    if not isinstance(frame_delay, int) or isinstance(frame_delay, bool) or frame_delay < 0:
+        errors.append(f"output.frame_delay must be a non-negative integer, got {frame_delay!r}")
+
     if errors:
         raise ProfileError(f"{ctx}:\n  - " + "\n  - ".join(errors))
 
@@ -171,6 +176,7 @@ def load_profile(name_or_path: str) -> Profile:
         frame_multiple=fm,
         overrides=overrides,
         max_seconds=float(max_seconds) if max_seconds is not None else None,
+        frame_delay=frame_delay,
     )
 
 

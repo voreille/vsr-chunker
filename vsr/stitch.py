@@ -82,6 +82,14 @@ def stitch_frames(
     return written
 
 
+def window(frames: Iterator[np.ndarray], skip: int, keep: int) -> Iterator[np.ndarray]:
+    """Yield frames ``skip .. skip+keep-1`` and consume the rest (so the decoder finishes
+    and its exit status is checked)."""
+    for j, frame in enumerate(frames):
+        if skip <= j < skip + keep:
+            yield frame
+
+
 # --- ffmpeg-backed I/O ----------------------------------------------------------
 
 def read_frames(cmd: list[str], samples: int, log: Path | None = None) -> Iterator[np.ndarray]:

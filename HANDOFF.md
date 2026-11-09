@@ -1,6 +1,19 @@
 # HANDOFF
 
-## Current milestone: 4 done (manifest, resume, redo, status, ETA). Next: milestone 5.
+## Current milestone: 4 done (manifest, resume, redo, status, ETA) + FlashVSR profile. Next: milestone 5.
+
+### Done (session 2026-11-09, FlashVSR profile)
+- `profiles/flashvsr_1_3b.yaml` + `workflows/flashvsr_1_3b_api.json` (Kijai WanVideoWrapper port, x2).
+  Benchmark on a 97-frame 960x544 chunk: SeedVR2 3B 186.6 s / 14.3 GiB; FlashVSR sdpa 144.9 s;
+  FlashVSR sageattn 97.4 s / 11.9 GiB (profile override `"8": attention_mode: sageattn`).
+  Output is smoother than SeedVR2 (luma fidelity vs source 27.0 vs 31.6 dB).
+- The port's output lags by one frame. New profile key `output.frame_delay` (`Profile.frame_delay`):
+  cut sends `delay_extra()` more frames (kept 4n+1, e.g. 97 -> 101), the model output must have that
+  many, stitching skips the first `frame_delay` frames (`stitch.window`). Job id includes it when
+  non-zero. Fake model `--fake delay1` + `test_frame_delay_realigned`. Verified on the real server:
+  best alignment at shift 0 after the fix.
+- FlashVSR needs output width/height divisible by 16: node 16 `ImageResizeKJv2` (KJNodes) rounds
+  the x2 size down (stretch; no-op for 960x544 -> 1920x1088, 854x480 -> 1696x960).
 
 ### Done (session 2026-11-09, milestone 4)
 - `vsr/job.py`: `Manifest` (`jobs/<id>/manifest.json`, atomic write): run args, plan, per-chunk
@@ -74,7 +87,7 @@
   trailing chunk that is only overlap. Exhaustively tested for 1..399 frames.
 - `vsr/profiles.py`: YAML profile loading + validation against the workflow JSON (nodes/fields
   exist, UI-format rejected), seed-field detection, `describe_workflow` for `vsr inspect`.
-  Extra optional keys: `output.prefix_field` (default `filename_prefix`), `chunk.max_seconds`.
+  Extra optional keys: `output.prefix_field` (default `filename_prefix`), `output.frame_delay`, `chunk.max_seconds`.
 - `vsr/ffmpeg.py`: argv builders for CFR conversion, frame-exact cut
   (`trim=start_frame:end_frame,setpts,tpad=clone`), and master (DNxHR HQ/HQX, ProRes; audio
   copy or PCM when trimmed; timecode offset for --range; color tags).
@@ -103,6 +116,15 @@ uv run vsr run <clip> --profile seedvr2_3b --fake identity --out /tmp/x   # full
 - Chaining: `--profile a,b`. Stage k's stitched output is a lossless intermediate (FFV1 .mkv or
   x264 lossless) fed to stage k+1 as its source, `/free` between stages, master only after the
   last stage. Each stage = its own job dir/manifest under a parent job.
+
+### ComfyUI-side changes made with the user's explicit approval (2026-11-09)
+- CLAUDE.md forbids downloading models; the user explicitly asked for this exception.
+  Downloaded from huggingface.co/Kijai/WanVideo_comfy (sha256 verified against HF LFS oids):
+  - `models/diffusion_models/WanVideo/FlashVSR/Wan2_1-T2V-1_3B_FlashVSR_fp32.safetensors` (5.68 GB)
+  - `models/diffusion_models/WanVideo/FlashVSR/Wan2_1_FlashVSR_LQ_proj_model_bf16.safetensors` (0.58 GB)
+  - `models/vae/Wan2_1_FlashVSR_TCDecoder_fp32.safetensors` (0.18 GB)
+  Not downloaded: `umt5-xxl-enc-bf16` (11.4 GB); the existing `umt5_xxl_fp16` works with Kijai's T5 loader.
+  No settings changed, no custom nodes installed. Disk was 98% full afterwards (24 GB free).
 
 ### Notes / open questions
 - System ffmpeg is 4.4 (Ubuntu 22.04): no `-fps_mode`; `ffmpeg.vsync()` picks `-vsync` on < 5.1.

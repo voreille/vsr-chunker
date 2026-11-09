@@ -43,6 +43,10 @@ chunk:
 
 Seed fields (`seed`, `noise_seed`) are detected and set to one fixed seed per job.
 
+If a model's output lags its input (output frame n shows input frame n-k), set
+`output.frame_delay: k`: the tool sends extra frames and drops the first k output frames
+(the FlashVSR profile uses 1).
+
 ## Examples
 
 ```

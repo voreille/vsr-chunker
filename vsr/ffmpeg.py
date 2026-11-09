@@ -119,10 +119,16 @@ def decode_command(src: str | Path, info: VideoInfo | None = None, pix_fmt: str 
 
 # --- fake models (tests without ComfyUI) -------------------------------------
 
-def fake_model_command(kind: str, src: str | Path, dst: str | Path, codec: ChunkCodec = DEFAULT_CHUNK_CODEC) -> list[str]:
+def fake_model_command(kind: str, src: str | Path, dst: str | Path, codec: ChunkCodec = DEFAULT_CHUNK_CODEC,
+                       frames: int | None = None) -> list[str]:
     if kind == "scale2":
         return [*FFMPEG, "-i", str(src), "-vf", "scale=iw*2:ih*2:flags=lanczos", *vsync("passthrough"),
                 *codec.args, str(dst)]
+    if kind.startswith("delay") and kind[5:].isdigit() and frames is not None:
+        # same frame count, shifted late by k frames (first frame repeated), like the FlashVSR port
+        k = int(kind[5:])
+        return [*FFMPEG, "-i", str(src), "-vf", f"tpad=start={k}:start_mode=clone", *vsync("passthrough"),
+                "-frames:v", str(frames), *codec.args, str(dst)]
     raise ValueError(f"unknown fake model {kind!r}")
 
 

@@ -96,3 +96,35 @@ def test_model_frame_mismatch_is_reported(clip, tmp_path):
 
     with pytest.raises(PipelineError, match="chunk 0: model output .* has 40 frames, expected 41"):
         run_job(plan, job_dir=tmp_path / "job", master_path=tmp_path / "m.mov", processor=drop_one)
+
+
+def test_frame_delay_realigned(clip, tmp_path):
+    """A model that lags by one frame (FlashVSR port) is realigned by the profile's frame_delay:
+    the master must match the identity run exactly."""
+    from vsr.profiles import load_profile
+    from vsr.plan import delay_extra, parse_frame_multiple
+    assert load_profile("flashvsr_1_3b").frame_delay == 1
+    fm = parse_frame_multiple("4n+1")
+    assert delay_extra(41, 1, fm) == 4 and delay_extra(41, 0, fm) == 0
+    assert delay_extra(10, 2, parse_frame_multiple("any")) == 2
+
+    common = ["--frames", "41", "--overlap", "8", "--codec", "prores", "--10bit"]
+    run_cli(clip, "--profile", "flashvsr_1_3b", "--fake", "delay1", *common, "--out", tmp_path / "d",
+            "--jobs-dir", tmp_path / "jobs")
+    run_cli(clip, "--profile", "seedvr2_3b", "--fake", "identity", *common, "--out", tmp_path / "i",
+            "--jobs-dir", tmp_path / "jobs")
+    d = next((tmp_path / "d").glob("*.mov"))
+    i = next((tmp_path / "i").glob("*.mov"))
+    assert probe(d).frame_count == probe(i).frame_count == 100
+
+    def frames(p):
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(p), "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                             capture_output=True, check=True).stdout
+        return np.frombuffer(raw, np.uint8).reshape(100, -1).astype(int)
+    assert np.abs(frames(d) - frames(i)).max() <= 1
+
+    # without the correction the lag shows: fake delay1 with a profile that has no frame_delay
+    run_cli(clip, "--profile", "seedvr2_3b", "--fake", "delay1", *common, "--out", tmp_path / "x",
+            "--jobs-dir", tmp_path / "jobs_x")  # own jobs dir: same job id as the identity run
+    x = next((tmp_path / "x").glob("*.mov"))
+    assert np.abs(frames(x) - frames(i)).max() > 10
