@@ -1,0 +1,16 @@
+# SeedVR2 3B (INT8 convrot checkpoint) - x2 upscale via ComfyUI's "Utility: SeedVR2 upscale video" template.
+name: seedvr2_3b
+workflow: workflows/utility_seedvr2_3b_int8_upscale_video.json
+input:
+  node_id: "73"          # LoadVideo
+  field: "file"
+output:
+  node_id: "76"          # SaveVideo
+  prefix_field: "filename_prefix"
+# Seed: the KSampler seed ([66:54].seed) is detected and set per job automatically.
+overrides: {}
+chunk:
+  frames: 97             # ~3.2 s at 30 fps, ~4 s at 24 fps
+  overlap: 8
+  frame_multiple: 4n+1
+  max_seconds: 4.5       # INT8 kernel crashes (illegal memory access) on long 1080p inputs

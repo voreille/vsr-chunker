@@ -5,3 +5,4 @@ jobs/
 *.mov
 *.mkv
 *.png
+.pytest_cache/
