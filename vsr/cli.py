@@ -14,7 +14,8 @@ from pathlib import Path
 from . import ffmpeg as ff
 from .plan import Chunk, overlaps, plan_chunks
 from .comfy import ComfyClient, ComfyError, ComfyFatalError
-from .pipeline import PipelineError, comfy_processor, fake_processor, run_ffmpeg, run_job
+from .job import MANIFEST, JobError, Manifest, parse_redo
+from .pipeline import PipelineError, comfy_processor, fake_processor, fmt_dur, run_ffmpeg, run_job
 from .probe import ProbeError, VideoInfo, check_tools, probe
 from .profiles import PROJECT_ROOT, Profile, ProfileError, describe_workflow, load_profile, load_workflow
 
@@ -201,6 +202,11 @@ def cmd_run(args) -> int:
     check_tools()
     info = probe(args.video)
     plan = build_plan(args, info)
+    if getattr(args, "expect_job_id", None) and plan.job_id != args.expect_job_id:
+        raise CliError(
+            f"cannot resume {args.expect_job_id}: the same arguments now give job {plan.job_id} "
+            f"(the source file {info.path} changed since the job was created)"
+        )
     if args.dry_run:
         print_dry_run(plan, args)
         return 0
@@ -238,17 +244,83 @@ def cmd_run(args) -> int:
         processor = comfy_processor(client, plan.profile, plan.job_id, plan.seed, timeout=args.timeout)
     else:
         processor = fake_processor(args.fake, job_dir / "logs" / "model.log")
+    print(f"(resume later with: vsr resume {plan.job_id})", flush=True)
     try:
         run_job(plan, job_dir=job_dir, master_path=master, processor=processor,
-                codec=args.codec, ten_bit=args.ten_bit)
+                codec=args.codec, ten_bit=args.ten_bit, args_record=run_args_record(args),
+                redo=parse_redo(args.redo))
     finally:
         if client:
             client.close()
     return 0
 
 
-def cmd_not_yet(args) -> int:
-    raise CliError(f"'vsr {args.command}' is not implemented yet (milestone 4)")
+# Arguments of `vsr run` stored in the manifest, so `vsr resume <id>` can replay them.
+RUN_ARG_KEYS = ("video", "profile", "out", "server", "seed", "frames", "overlap", "range",
+                "codec", "ten_bit", "timeout", "fake")
+
+
+def run_args_record(args) -> dict:
+    rec = {k: getattr(args, k) for k in RUN_ARG_KEYS}
+    rec["video"] = str(Path(args.video).resolve())
+    if Path(args.profile).is_file():
+        rec["profile"] = str(Path(args.profile).resolve())
+    if args.out:
+        rec["out"] = str(Path(args.out).resolve())
+    return rec
+
+
+def _job_dir(args) -> Path:
+    d = Path(args.jobs_dir) / args.job_id
+    if not (d / MANIFEST).is_file():
+        known = sorted(p.parent.name for p in Path(args.jobs_dir).glob(f"*/{MANIFEST}"))
+        raise CliError(f"no job {args.job_id!r} in {args.jobs_dir}" + (f". Known jobs: {', '.join(known)}" if known else ""))
+    return d
+
+
+def cmd_resume(args) -> int:
+    m = Manifest.load(_job_dir(args))
+    stored = m.data.get("args") or {}
+    if not stored.get("video"):
+        raise CliError(f"job {args.job_id} has no stored run arguments; rerun it with 'vsr run'")
+    run_args = build_parser().parse_args(["run", stored["video"], "--profile", stored["profile"]])
+    for k in RUN_ARG_KEYS:
+        if k in stored:
+            setattr(run_args, k, stored[k])
+    if args.server:
+        run_args.server = args.server
+    if args.timeout:
+        run_args.timeout = args.timeout
+    run_args.redo = args.redo
+    run_args.jobs_dir = args.jobs_dir
+    run_args.expect_job_id = args.job_id
+    return cmd_run(run_args)
+
+
+def cmd_status(args) -> int:
+    m = Manifest.load(_job_dir(args))
+    d = m.data
+    counts = m.counts()
+    print(f"job      {d['job_id']}  (created {d['created']}, updated {d['updated']})")
+    print(f"source   {d.get('source')}")
+    print(f"profile  {d.get('profile')}  seed {d.get('seed')}  frames {d.get('frames')} overlap {d.get('overlap')}  "
+          f"range {d.get('range_start')}+{d.get('range_frames')} frames")
+    print("chunks   " + ", ".join(f"{v} {k}" for k, v in counts.items() if v))
+    print(f"  {'#':>4} {'status':8} {'start':>7} {'len':>5} {'pad':>4} {'tries':>5} {'time':>8}  output / error")
+    for c in m.chunks:
+        dur = fmt_dur(c["duration_s"]) if c.get("duration_s") is not None else "-"
+        extra = c["error"] if c.get("error") else (Path(c["output"]["path"]).name if c.get("output") else "")
+        print(f"  {c['index']:>4} {c['status']:8} {c['start']:>7} {c['length']:>5} {c['pad']:>4} "
+              f"{c.get('attempts', 0):>5} {dur:>8}  {extra.splitlines()[0] if extra else ''}")
+    done = [c for c in m.chunks if c["status"] == "done" and c.get("duration_s")]
+    if done and counts["done"] < len(m.chunks):
+        spf = sum(c["duration_s"] for c in done) / sum(c["length"] + c["pad"] for c in done)
+        left = sum(c["length"] + c["pad"] for c in m.chunks if c["status"] != "done")
+        print(f"estimate {fmt_dur(spf * left)} left at {spf:.2f} s/frame")
+    master = d.get("master")
+    print(f"master   {master['path']} ({master['width']}x{master['height']}, {master['frames']} frames)"
+          if master else "master   not written yet")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -273,14 +345,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="probe + plan + print commands; don't touch ComfyUI")
     p.add_argument("--timeout", type=float, default=3600.0, help="max seconds per chunk in ComfyUI (default 3600)")
     p.add_argument("--jobs-dir", default=str(JOBS_DIR), help=f"job state directory (default {JOBS_DIR})")
+    p.add_argument("--redo", help="reprocess these chunks even if done, e.g. 3,7 or 2-5")
     p.add_argument("--fake", choices=["identity", "scale2"],
                    help="testing: replace the ComfyUI model with a local fake (copy, or lanczos x2)")
     p.set_defaults(func=cmd_run)
 
-    for name in ("resume", "status"):
-        p = sub.add_parser(name, help=f"{name} a job (not implemented yet)")
-        p.add_argument("job_id")
-        p.set_defaults(func=cmd_not_yet)
+    p = sub.add_parser("resume", help="continue a job with its stored arguments (skips done chunks)")
+    p.add_argument("job_id")
+    p.add_argument("--server", help="override the stored ComfyUI URL")
+    p.add_argument("--timeout", type=float, help="override the stored per-chunk timeout")
+    p.add_argument("--redo", help="reprocess these chunks, e.g. 3,7 or 2-5")
+    p.add_argument("--jobs-dir", default=str(JOBS_DIR))
+    p.set_defaults(func=cmd_resume)
+
+    p = sub.add_parser("status", help="show a job's chunk states")
+    p.add_argument("job_id")
+    p.add_argument("--jobs-dir", default=str(JOBS_DIR))
+    p.set_defaults(func=cmd_status)
     return ap
 
 
@@ -291,9 +372,12 @@ def main(argv: list[str] | None = None) -> int:
     except ComfyFatalError as e:
         print(f"fatal ComfyUI error: {e}", file=sys.stderr)
         return 2
-    except (CliError, ProbeError, ProfileError, PipelineError, ComfyError) as e:
+    except (CliError, ProbeError, ProfileError, PipelineError, ComfyError, JobError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("\ninterrupted; done chunks are kept. Continue with 'vsr resume <job_id>'.", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

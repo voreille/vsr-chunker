@@ -9,7 +9,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import ffmpeg as ff
-from .probe import VideoInfo, probe
+from .job import Eta, Manifest, now
+from .probe import ProbeError, VideoInfo, probe
 from .stitch import FrameWriter, StitchError, read_frames, stitch_frames
 
 # processor(index, input_chunk_path, output_path) -> path of the processed chunk
@@ -60,7 +61,14 @@ def comfy_processor(client, profile, job_id: str, seed: int, *, timeout: float =
         value = client.upload(src, name=name, subfolder="vsr")
         wf = patch_workflow(profile, value, f"vsr/vsr_{job_id}_{i:03d}", seed)
         prompt_id = client.queue(wf)
-        entry = client.wait(prompt_id, timeout=timeout)
+        try:
+            entry = client.wait(prompt_id, timeout=timeout)
+        except KeyboardInterrupt:
+            try:
+                log(f"chunk {i}: prompt {prompt_id} {client.cancel(prompt_id)}")
+            except ComfyError:
+                pass
+            raise
         files = client.outputs(entry, profile.output_node)
         videos = [f for f in files if Path(f.filename).suffix.lower() in (".mp4", ".mov", ".mkv", ".webm", ".avi")]
         if len(videos) != 1:
@@ -79,8 +87,12 @@ def fmt_dur(s: float) -> str:
 
 
 def run_job(plan, *, job_dir: Path, master_path: Path, processor: Processor,
-            codec: str = "dnxhr", ten_bit: bool = False) -> Path:
-    """``plan`` is a cli.RunPlan. Returns the path of the verified master."""
+            codec: str = "dnxhr", ten_bit: bool = False, args_record: dict | None = None,
+            redo: list[int] | None = None) -> Path:
+    """``plan`` is a cli.RunPlan. Resumable: chunks marked done in ``job_dir/manifest.json``
+    (with an intact output file) are skipped. Returns the path of the verified master."""
+    from .comfy import ComfyError, ComfyFatalError
+
     info: VideoInfo = plan.info
     chunks_dir = job_dir / "chunks"
     out_dir = job_dir / "out"
@@ -90,39 +102,86 @@ def run_job(plan, *, job_dir: Path, master_path: Path, processor: Processor,
     ext = ff.DEFAULT_CHUNK_CODEC.ext
     n = len(plan.chunks)
 
-    # 1. cut
+    m = Manifest.open(job_dir, job_id=plan.job_id, args=args_record or {}, chunks=plan.chunks, plan_info={
+        "source": info.path, "profile": plan.profile.name, "seed": plan.seed,
+        "range_start": plan.range_start, "range_frames": plan.range_frames,
+        "frames": plan.frames, "overlap": plan.overlap,
+    })
+    if redo:
+        m.redo(redo)
+        log(f"redo: chunk(s) {', '.join(map(str, redo))} reset to pending")
+    todo = []
+    for i in range(n):
+        if m.is_done(i):
+            continue
+        if m.chunk(i)["status"] == "done":
+            log(f"chunk {i}: marked done but its output is missing or changed; redoing it")
+            m.chunk(i)["status"] = "pending"
+        todo.append(i)
+    if len(todo) < n:
+        log(f"resuming: {n - len(todo)}/{n} chunk(s) already done")
+
+    # 1. cut (only what still needs processing; cheap, so always recut)
     t0 = time.monotonic()
-    inputs = []
-    for i, c in enumerate(plan.chunks):
+    inputs: dict[int, Path] = {}
+    for i in todo:
+        c = plan.chunks[i]
         dst = chunks_dir / f"chunk_{i:03d}{ext}"
         run_ffmpeg(ff.cut_command(plan.frame_source, dst, plan.range_start + c.start, c.length, c.pad),
                    logs / "cut.log", f"cutting chunk {i}")
         got = probe(dst).frame_count
         if got != c.padded_length:
             raise PipelineError(f"chunk {i}: cut produced {got} frames, expected {c.padded_length}")
-        inputs.append(dst)
-    log(f"cut {n} chunk(s) in {fmt_dur(time.monotonic() - t0)}")
+        m.mark_input(i, dst)
+        inputs[i] = dst
+    if todo:
+        log(f"cut {len(todo)} chunk(s) in {fmt_dur(time.monotonic() - t0)}")
 
     # 2. process
-    outputs: list[Path] = []
-    t_start = time.monotonic()
-    for i, (c, src) in enumerate(zip(plan.chunks, inputs)):
+    eta = Eta()
+    frames_left = sum(plan.chunks[i].padded_length for i in todo)
+    for k, i in enumerate(todo, 1):
+        c = plan.chunks[i]
+        m.mark_running(i)
         t = time.monotonic()
-        out = processor(i, src, out_dir / f"chunk_{i:03d}{ext}")
-        oi = probe(out)
-        if oi.frame_count != c.padded_length:
-            raise PipelineError(
-                f"chunk {i}: model output {out} has {oi.frame_count} frames, expected {c.padded_length} "
-                f"(source frames {plan.range_start + c.start}..{plan.range_start + c.end}, pad {c.pad})"
-            )
-        outputs.append(out)
+        try:
+            out = processor(i, inputs[i], out_dir / f"chunk_{i:03d}{ext}")
+            oi = probe(out)
+            if oi.frame_count != c.padded_length:
+                raise PipelineError(
+                    f"chunk {i}: model output {out} has {oi.frame_count} frames, expected {c.padded_length} "
+                    f"(source frames {plan.range_start + c.start}..{plan.range_start + c.end}, pad {c.pad})"
+                )
+        except ComfyFatalError as e:
+            m.mark_failed(i, str(e), time.monotonic() - t)
+            raise
+        except (ComfyError, PipelineError, ProbeError) as e:
+            m.mark_failed(i, str(e), time.monotonic() - t)
+            log(f"chunk {i} FAILED: {e}")
+            frames_left -= c.padded_length
+            continue
+        except BaseException:  # Ctrl-C etc.: leave it to be redone
+            m.chunk(i).update(status="pending", error="interrupted")
+            m.save()
+            raise
         dt = time.monotonic() - t
-        done = i + 1
-        eta = (time.monotonic() - t_start) / done * (n - done)
-        log(f"chunk {done}/{n}: {c.padded_length} frames -> {oi.width}x{oi.height} in {fmt_dur(dt)}"
-            + (f", ETA {fmt_dur(eta)}" if done < n else ""))
+        m.mark_done(i, out, frames=oi.frame_count, width=oi.width, height=oi.height, duration=dt)
+        eta.add(c.padded_length, dt)
+        frames_left -= c.padded_length
+        rem = eta.remaining(frames_left)
+        log(f"chunk {i} ({k}/{len(todo)}): {c.padded_length} frames -> {oi.width}x{oi.height} in {fmt_dur(dt)} "
+            f"({dt / c.padded_length:.2f} s/frame)" + (f", ETA {fmt_dur(rem)}" if frames_left and rem else ""))
 
-    sizes = {(o.width, o.height) for o in map(probe, outputs)}
+    failed = [c for c in m.chunks if c["status"] != "done"]
+    if failed:
+        lines = "\n".join(f"  chunk {c['index']}: {c['error']}" for c in failed)
+        raise PipelineError(
+            f"{len(failed)} chunk(s) failed; not stitching.\n{lines}\n"
+            f"Fix the cause, then rerun: vsr resume {plan.job_id}"
+        )
+
+    outputs = [Path(c["output"]["path"]) for c in m.chunks]
+    sizes = {(c["output"]["width"], c["output"]["height"]) for c in m.chunks}
     if len(sizes) != 1:
         raise PipelineError(f"processed chunks have different sizes: {sorted(sizes)}")
     (w, h), = sizes
@@ -159,5 +218,7 @@ def run_job(plan, *, job_dir: Path, master_path: Path, processor: Processor,
         raise PipelineError(f"master {final} has {mi.frame_count} frames, expected {plan.range_frames}")
     if (mi.width, mi.height) != (w, h):
         raise PipelineError(f"master {final} is {mi.width}x{mi.height}, expected {w}x{h}")
+    m.data["master"] = {"path": str(final), "frames": mi.frame_count, "width": w, "height": h, "finished": now()}
+    m.save()
     log(f"master OK: {final}  ({w}x{h}, {mi.frame_count} frames, {mi.duration:.3f}s)")
     return final

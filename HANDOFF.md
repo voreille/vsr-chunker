@@ -1,6 +1,23 @@
 # HANDOFF
 
-## Current milestone: 3 done (ComfyUI client, real SeedVR2 run). Next: milestone 4.
+## Current milestone: 4 done (manifest, resume, redo, status, ETA). Next: milestone 5.
+
+### Done (session 2026-11-09, milestone 4)
+- `vsr/job.py`: `Manifest` (`jobs/<id>/manifest.json`, atomic write): run args, plan, per-chunk
+  status pending/running/done/failed, attempts, duration, error, input/output sha256 + size;
+  master info. Reopening checks the chunk plan is unchanged; `running` -> `pending` (crash).
+  A chunk is skipped only if `done` AND its output file still matches its checksum.
+- `run_job`: cuts and processes only unfinished chunks. Non-fatal chunk errors -> `failed`,
+  keep going, then stop before stitching with the list of errors + `vsr resume <id>`.
+  `ComfyFatalError` -> stop at once. Ctrl-C -> chunk back to `pending`, our ComfyUI prompt is
+  removed from the queue or interrupted (`ComfyClient.cancel`, only if it is ours), exit 130.
+- ETA weighted by frames (s/frame of chunks done this session x frames left).
+- CLI: `--redo 3,7` / `2-5` on run and resume; `vsr resume <id>` replays the stored args
+  (`--server`, `--timeout` overridable; refuses if the source file changed, since the job id
+  then differs); `vsr status <id>` prints the chunk table, estimate, master.
+  Rerunning the same `vsr run` command continues the same job.
+- Real-server test: interrupted a 3-chunk SeedVR2 job during chunk 1 -> ComfyUI queue empty;
+  `vsr resume` redid chunks 1-2 only, master 96 frames. ETA predicted 0:28, actual 0:28.
 
 ### Done (session 2026-11-09, milestone 3)
 - `vsr/comfy.py`: httpx client. upload (`/upload/image`, subfolder `vsr`, overwrite), queue
@@ -71,19 +88,21 @@
 
 ### Rerun tests
 ```
-uv sync && uv run pytest -q          # 70 tests, ~17 s, needs ffmpeg, no GPU (mock ComfyUI)
+uv sync && uv run pytest -q          # 79 tests, ~21 s, needs ffmpeg, no GPU (mock ComfyUI)
 uv run vsr run <clip> --profile seedvr2_3b --dry-run
 uv run vsr run <clip> --profile seedvr2_3b --fake identity --out /tmp/x   # full pipeline, no ComfyUI
 # real end-to-end test: see README "Manual end-to-end test"
 ```
 
-### Next (milestone 4: manifest / resume / ETA)
-- `jobs/<id>/manifest.json`: per-chunk status pending/running/done/failed, paths, durations,
-  checksums (input chunk + output). Rerun skips `done` chunks whose files still match.
-  `--redo 3,7`. `vsr resume <job_id>` / `vsr status <job_id>` (store the run args in the manifest).
-- ETA exists already (mean chunk time x remaining); make it weight by frames.
-- A failed chunk currently stops the whole job. With the manifest: non-fatal error -> mark failed,
-  continue or stop (decide); ComfyFatalError -> always stop.
+### Next (milestone 5: Wan detailer profile; multi-stage chaining)
+- Needs from the user: the Wan 2.2 detailer workflow exported in API format, in `workflows/`.
+  Then `vsr inspect` it and write `profiles/wan22_detailer.yaml` (frames <= 81, 4n+1; override
+  `ImageFromBatch` batch_index=0 / length=chunk length if it is the "Utility Video Upscale" one).
+  The `length` override depends on each chunk, so profiles need a way to say "chunk length"
+  (e.g. a `$chunk_frames` placeholder in overrides).
+- Chaining: `--profile a,b`. Stage k's stitched output is a lossless intermediate (FFV1 .mkv or
+  x264 lossless) fed to stage k+1 as its source, `/free` between stages, master only after the
+  last stage. Each stage = its own job dir/manifest under a parent job.
 
 ### Notes / open questions
 - System ffmpeg is 4.4 (Ubuntu 22.04): no `-fps_mode`; `ffmpeg.vsync()` picks `-vsync` on < 5.1.
@@ -98,3 +117,6 @@ uv run vsr run <clip> --profile seedvr2_3b --fake identity --out /tmp/x   # full
   delete endpoint). Clean them by hand. They also appear in LoadVideo's file list in the UI.
 - SeedVR2 is slow here: ~1.7 s/frame at 1708x960 (tiled VAE, INT8). Not investigated.
 - Not tested on a real server yet: the CUDA-crash path (only via the mock) and long chunks.
+- Unknown: whether SeedVR2 output is bit-identical for the same seed (matters for --redo
+  consistency at chunk borders; the crossfade hides small differences anyway).
+- The master is re-stitched on every successful run/resume, even if it already exists (cheap).

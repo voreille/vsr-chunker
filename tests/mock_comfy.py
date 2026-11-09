@@ -21,6 +21,9 @@ class MockComfy:
         self.prompts: list[dict] = []
         self.history: dict[str, dict] = {}
         self.frees: list[dict] = []
+        self.running: list[str] = []  # prompt ids reported as running by /queue
+        self.pending: list[str] = []
+        self.posts: list[tuple[str, dict]] = []  # (path, body) of /queue and /interrupt calls
         self.mode = "ok"  # ok | cuda | oom | reject | nothing
         self.output_key = "images"  # images | gifs | videos
         self.output_ext = ".mp4"
@@ -88,7 +91,8 @@ class MockComfy:
                     pid = u.path.split("/")[-1]
                     return self._send(200, {pid: mock.history[pid]} if pid in mock.history else {})
                 if u.path == "/queue":
-                    return self._send(200, {"queue_running": [], "queue_pending": []})
+                    return self._send(200, {"queue_running": [[0, p, {}, {}, []] for p in mock.running],
+                                            "queue_pending": [[1, p, {}, {}, []] for p in mock.pending]})
                 if u.path == "/view":
                     key = (q.get("type", "output"), q.get("subfolder", ""), q["filename"])
                     if key not in mock.files:
@@ -120,6 +124,9 @@ class MockComfy:
                             "node_errors": {mock.input_node: {"class_type": "LoadVideo", "errors": [
                                 {"message": "Value not in list", "details": "file: 'x.mp4' not in [...]"}]}}})
                     return self._send(200, {"prompt_id": mock._execute(prompt), "number": 1, "node_errors": {}})
+                if u.path in ("/queue", "/interrupt"):
+                    mock.posts.append((u.path, json.loads(body)))
+                    return self._send(200, {})
                 if u.path == "/free":
                     mock.frees.append(json.loads(body))
                     return self._send(200, {})

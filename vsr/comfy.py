@@ -168,6 +168,18 @@ class ComfyClient:
         tmp.replace(dst)
         return dst
 
+    def cancel(self, prompt_id: str) -> str:
+        """Remove our prompt from the queue, or interrupt it if it's the one running.
+        Never interrupts someone else's prompt. Returns what was done."""
+        q = self.queue_state() or {}
+        if any(item[1] == prompt_id for item in q.get("queue_pending", [])):
+            self._json("POST", "/queue", json={"delete": [prompt_id]})
+            return "removed from queue"
+        if any(item[1] == prompt_id for item in q.get("queue_running", [])):
+            self._json("POST", "/interrupt", json={"prompt_id": prompt_id})
+            return "interrupted"
+        return "not queued"
+
     def free(self, unload_models: bool = True, free_memory: bool = True) -> None:
         self._json("POST", "/free", json={"unload_models": unload_models, "free_memory": free_memory})
 

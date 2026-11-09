@@ -5,7 +5,7 @@ import pytest
 from mock_comfy import MockComfy
 from vsr import cli
 from vsr.comfy import ComfyClient, ComfyError, ComfyFatalError
-from vsr.pipeline import comfy_processor, run_job
+from vsr.pipeline import PipelineError, comfy_processor, run_job
 from vsr.probe import probe
 
 
@@ -66,10 +66,12 @@ def test_cuda_error_is_fatal(clip, client, mock, tmp_path):
 def test_non_fatal_execution_error(clip, client, mock, tmp_path):
     mock.mode = "oom"
     plan = plan_for(clip)
-    with pytest.raises(ComfyError, match="node 66:54 \\(KSampler\\).*exceed") as e:
+    # non-fatal: every chunk is attempted, then the job fails without stitching
+    with pytest.raises(PipelineError, match="(?s)3 chunk\\(s\\) failed.*node 66:54 \\(KSampler\\).*exceed.*vsr resume"):
         run_job(plan, job_dir=tmp_path / "job", master_path=tmp_path / "m.mov",
                 processor=comfy_processor(client, plan.profile, plan.job_id, plan.seed))
-    assert not isinstance(e.value, ComfyFatalError)
+    assert len(mock.prompts) == 3
+    assert not (tmp_path / "m.mov").exists()
 
 
 def test_rejected_workflow(client, mock):
@@ -82,7 +84,7 @@ def test_rejected_workflow(client, mock):
 def test_no_output(clip, client, mock, tmp_path):
     mock.mode = "nothing"
     plan = plan_for(clip)
-    with pytest.raises(ComfyError, match="output node 76 produced nothing"):
+    with pytest.raises(PipelineError, match="output node 76 produced nothing"):
         run_job(plan, job_dir=tmp_path / "job", master_path=tmp_path / "m.mov",
                 processor=comfy_processor(client, plan.profile, plan.job_id, plan.seed))
 
@@ -104,3 +106,11 @@ def test_cli_against_mock(clip, mock, tmp_path, capsys):
                    "--jobs-dir", str(tmp_path / "jobs"), "--out", str(tmp_path)])
     assert rc == 0, capsys.readouterr().err
     assert probe(tmp_path / "clip_seedvr2_3b_320x240.mov").frame_count == 100
+
+
+def test_cancel_only_touches_our_prompt(client, mock):
+    mock.pending, mock.running = ["a"], ["b"]
+    assert client.cancel("a") == "removed from queue"
+    assert client.cancel("b") == "interrupted"
+    assert client.cancel("zzz") == "not queued"
+    assert mock.posts == [("/queue", {"delete": ["a"]}), ("/interrupt", {"prompt_id": "b"})]

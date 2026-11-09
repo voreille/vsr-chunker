@@ -2,7 +2,7 @@
 
 Upscale long videos through ComfyUI workflows (SeedVR2, Wan 2.2, FlashVSR, ...) in overlapping
 chunks, stitch them with crossfades, and write a Resolve-friendly master (DNxHR/ProRes) with the
-original audio and timecode. Status: milestone 3 (full single-profile runs through ComfyUI; no resume yet).
+original audio and timecode. Status: milestone 4 (single-profile runs through ComfyUI, resumable).
 
 ## Install
 
@@ -53,6 +53,16 @@ uv run vsr run clip.mp4 --profile seedvr2_3b --dry-run --range 10-15 --frames 81
 # whole pipeline with a fake model instead of ComfyUI (identity copy, or lanczos x2):
 uv run vsr run clip.mp4 --profile seedvr2_3b --fake scale2 --out /tmp/test --10bit
 ```
+
+Jobs are resumable. Rerunning the same command, or `vsr resume <job_id>`, skips finished chunks:
+
+```
+uv run vsr status <job_id>                 # chunk table, errors, time left
+uv run vsr resume <job_id> [--redo 3,7]    # continue / reprocess specific chunks
+```
+
+Ctrl-C is safe: finished chunks are kept and the running ComfyUI prompt is cancelled.
+A CUDA error stops the job (exit 2): restart ComfyUI, then `vsr resume`.
 
 Uploads go to ComfyUI's `input/vsr/`, outputs to `output/vsr/` (named `vsr_<job>_<chunk>`).
 They are not deleted (the API can't); clean those folders by hand from time to time.
