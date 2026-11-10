@@ -1,0 +1,26 @@
+# Wan 2.2 T2V A14B low-noise model as a video detailer: re-renders the input at low denoise
+# (denoise_strength 0.3 of 8 Lightning steps = 3 steps) to add fine texture. Meant as a second
+# stage after an upscaler (input already at the target size). Built for this repo from
+# Kijai's ComfyUI-WanVideoWrapper nodes; LoRA: Kijai/WanVideo_comfy Wan22-Lightning LOW rank64.
+name: wan22_detailer
+workflow: workflows/wan22_detailer_api.json
+input:
+  node_id: "1"           # LoadVideo
+  field: "file"
+output:
+  node_id: "16"          # SaveVideo (ProRes .mov)
+  prefix_field: "filename_prefix"
+resize:
+  node_id: "3"           # Resize Image/Mask, "scale dimensions"
+  width_field: "resize_type.width"
+  height_field: "resize_type.height"
+  multiple: 16           # Wan: both sides divisible by 16 (1080 -> 1088)
+# Seed: WanVideoSampler [13].seed is detected and set per job.
+# Sampler [13]: shift 1.0 (NOT the t2v default 5: with shift 5, denoise 0.3 starts at sigma ~0.68 and
+# redraws shapes), denoise_strength 0.3 = 3 of 8 Lightning steps. 0.45 changes more, no more detail.
+# Block swap [9]: all 40 blocks on the CPU; with 20, 81 frames at 1904x1088 run out of VRAM.
+# Speed (3090, 1904x1088, 81 frames): 19:37 per chunk (~14.5 s/frame), peak 16.5 GB VRAM.
+chunk:
+  frames: 81             # <= 81 is safe on 24 GB
+  overlap: 8
+  frame_multiple: 4n+1   # Wan temporal compression

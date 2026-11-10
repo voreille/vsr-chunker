@@ -1,0 +1,274 @@
+{
+  "1": {
+    "class_type": "LoadVideo",
+    "_meta": {
+      "title": "Load Video"
+    },
+    "inputs": {
+      "file": "input.mp4"
+    }
+  },
+  "2": {
+    "class_type": "GetVideoComponents",
+    "_meta": {
+      "title": "Get Video Components"
+    },
+    "inputs": {
+      "video": [
+        "1",
+        0
+      ]
+    }
+  },
+  "3": {
+    "class_type": "ResizeImageMaskNode",
+    "_meta": {
+      "title": "Resize to target (multiple of 16)"
+    },
+    "inputs": {
+      "input": [
+        "2",
+        0
+      ],
+      "scale_method": "lanczos",
+      "resize_type": "scale dimensions",
+      "resize_type.width": 1920,
+      "resize_type.height": 1088,
+      "resize_type.crop": "disabled"
+    }
+  },
+  "4": {
+    "class_type": "GetImageSizeAndCount",
+    "_meta": {
+      "title": "Get Image Size & Count"
+    },
+    "inputs": {
+      "image": [
+        "3",
+        0
+      ]
+    }
+  },
+  "5": {
+    "class_type": "WanVideoEmptyEmbeds",
+    "_meta": {
+      "title": "WanVideo Empty Embeds"
+    },
+    "inputs": {
+      "width": [
+        "4",
+        1
+      ],
+      "height": [
+        "4",
+        2
+      ],
+      "num_frames": [
+        "4",
+        3
+      ]
+    }
+  },
+  "6": {
+    "class_type": "WanVideoVAELoader",
+    "_meta": {
+      "title": "Wan 2.1 VAE"
+    },
+    "inputs": {
+      "model_name": "wan_2.1_vae.safetensors",
+      "precision": "bf16"
+    }
+  },
+  "7": {
+    "class_type": "WanVideoEncode",
+    "_meta": {
+      "title": "WanVideo Encode (source latent)"
+    },
+    "inputs": {
+      "vae": [
+        "6",
+        0
+      ],
+      "image": [
+        "4",
+        0
+      ],
+      "enable_vae_tiling": true,
+      "tile_x": 272,
+      "tile_y": 272,
+      "tile_stride_x": 144,
+      "tile_stride_y": 128,
+      "noise_aug_strength": 0.0,
+      "latent_strength": 1.0
+    }
+  },
+  "8": {
+    "class_type": "WanVideoLoraSelect",
+    "_meta": {
+      "title": "Lightning 4-step LoRA (LOW)"
+    },
+    "inputs": {
+      "lora": "Wan22_A14B_T2V_LOW_Lightning_4steps_lora_250928_rank64_fp16.safetensors",
+      "strength": 1.0,
+      "low_mem_load": false,
+      "merge_loras": true
+    }
+  },
+  "9": {
+    "class_type": "WanVideoBlockSwap",
+    "_meta": {
+      "title": "Block Swap"
+    },
+    "inputs": {
+      "blocks_to_swap": 40,
+      "offload_img_emb": true,
+      "offload_txt_emb": true,
+      "use_non_blocking": true,
+      "vace_blocks_to_swap": 0,
+      "prefetch_blocks": 1,
+      "block_swap_debug": false
+    }
+  },
+  "10": {
+    "class_type": "WanVideoModelLoader",
+    "_meta": {
+      "title": "Wan 2.2 T2V A14B LOW (fp8)"
+    },
+    "inputs": {
+      "model": "Wan2_2-T2V-A14B-LOW_fp8_e4m3fn_scaled_KJ.safetensors",
+      "base_precision": "bf16",
+      "quantization": "fp8_e4m3fn_scaled",
+      "load_device": "offload_device",
+      "attention_mode": "sageattn",
+      "rms_norm_function": "default",
+      "lora": [
+        "8",
+        0
+      ],
+      "block_swap_args": [
+        "9",
+        0
+      ]
+    }
+  },
+  "11": {
+    "class_type": "LoadWanVideoT5TextEncoder",
+    "_meta": {
+      "title": "Load T5"
+    },
+    "inputs": {
+      "model_name": "umt5_xxl_fp16.safetensors",
+      "precision": "bf16",
+      "load_device": "offload_device",
+      "quantization": "disabled"
+    }
+  },
+  "12": {
+    "class_type": "WanVideoTextEncode",
+    "_meta": {
+      "title": "Prompt"
+    },
+    "inputs": {
+      "t5": [
+        "11",
+        0
+      ],
+      "force_offload": true,
+      "use_disk_cache": false,
+      "device": "gpu",
+      "positive_prompt": "photorealistic, natural film footage, fine detailed textures, sharp focus, realistic skin texture, natural lighting",
+      "negative_prompt": "blurry, smooth plastic skin, oversharpened, cartoon, painting, CGI, watermark, text, subtitles, artifacts, low quality, JPEG compression, deformed"
+    }
+  },
+  "13": {
+    "class_type": "WanVideoSampler",
+    "_meta": {
+      "title": "WanVideo Sampler (low denoise)"
+    },
+    "inputs": {
+      "model": [
+        "10",
+        0
+      ],
+      "image_embeds": [
+        "5",
+        0
+      ],
+      "text_embeds": [
+        "12",
+        0
+      ],
+      "samples": [
+        "7",
+        0
+      ],
+      "steps": 8,
+      "cfg": 1.0,
+      "shift": 1.0,
+      "seed": 42,
+      "force_offload": true,
+      "scheduler": "euler",
+      "riflex_freq_index": 0,
+      "denoise_strength": 0.3,
+      "batched_cfg": false,
+      "rope_function": "comfy",
+      "start_step": 0,
+      "end_step": -1,
+      "add_noise_to_samples": true
+    }
+  },
+  "14": {
+    "class_type": "WanVideoDecode",
+    "_meta": {
+      "title": "WanVideo Decode"
+    },
+    "inputs": {
+      "vae": [
+        "6",
+        0
+      ],
+      "samples": [
+        "13",
+        0
+      ],
+      "enable_vae_tiling": true,
+      "tile_x": 272,
+      "tile_y": 272,
+      "tile_stride_x": 144,
+      "tile_stride_y": 128,
+      "normalization": "default"
+    }
+  },
+  "15": {
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "Create Video"
+    },
+    "inputs": {
+      "images": [
+        "14",
+        0
+      ],
+      "fps": [
+        "2",
+        2
+      ]
+    }
+  },
+  "16": {
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "Save Video"
+    },
+    "inputs": {
+      "video": [
+        "15",
+        0
+      ],
+      "filename_prefix": "video/wan22_detail",
+      "format": "mov",
+      "format.codec": "prores",
+      "codec": "auto"
+    }
+  }
+}

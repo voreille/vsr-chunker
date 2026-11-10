@@ -62,6 +62,7 @@ vsr run clip.mp4 --profile seedvr2_3b                 # 1080p output (default)
 vsr run clip.mp4 --profile seedvr2_3b --height 1440   # or --scale 2
 vsr run clip.mp4 --profile seedvr2_3b --prescale 480   # soft 720p source: shrink to its real detail first
 vsr detect-res clip.mp4                                # was it upscaled? suggests a --prescale value
+vsr run clip_seedvr2_3b_1920x1080.mov --profile wan22_detailer   # optional Wan 2.2 texture pass (~14 s/frame)
 uv run vsr run clip.mp4 --profile seedvr2_3b                      # real run, master next to clip.mp4
 uv run vsr run clip.mp4 --profile seedvr2_3b --range 10-14 --seed 42 --server http://127.0.0.1:8188
 uv run vsr run clip.mp4 --profile seedvr2_3b --dry-run

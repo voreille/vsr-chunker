@@ -1,6 +1,54 @@
 # HANDOFF
 
-## Current milestone: 4 done (manifest, resume, redo, status, ETA) + FlashVSR profile + output size. Next: milestone 5.
+## Current milestone: 4 done + FlashVSR, output size, prescale, detect-res. Milestone 5 started: Wan 2.2 detailer profile works (single stage); chaining not done.
+
+### Rebuild after the SSD wipe (2026-11-10: the SSD is faulty and will be wiped)
+- Code: everything is in git (github.com:voreille/vsr-chunker). `uv sync && uv run pytest -q`.
+- Not in git: `jobs/` (runtime state, disposable), the scratchpad test clips/results (disposable).
+- ComfyUI side, to reinstall by hand (0.44.0; templates package 0.11.103), launched with
+  `python main.py --enable-manager --use-sage-attention --fast fp16_accumulation`.
+  Custom nodes (via ComfyUI-Manager): ComfyUI-WanVideoWrapper (Kijai), comfyui-kjnodes,
+  comfyui-videohelpersuite, comfyui_essentials. SageAttention installed in ComfyUI's venv.
+  Models used by the profiles (folder under `models/`, size):
+  | profile | file | size | source |
+  |---|---|---|---|
+  | seedvr2_3b | diffusion_models/seedvr2_3b_int8_convrot.safetensors | 3.46 GB | ComfyUI template "SeedVR2 3B int8 upscale video" (its model links) |
+  | seedvr2_3b | vae/seedvr2_ema_vae_fp16.safetensors | 0.50 GB | same template |
+  | (benchmark only) | diffusion_models/seedvr2_3b_fp16.safetensors | 6.78 GB | same family |
+  | flashvsr_1_3b | diffusion_models/WanVideo/FlashVSR/Wan2_1-T2V-1_3B_FlashVSR_fp32.safetensors | 5.68 GB | huggingface.co/Kijai/WanVideo_comfy (FlashVSR/) |
+  | flashvsr_1_3b | diffusion_models/WanVideo/FlashVSR/Wan2_1_FlashVSR_LQ_proj_model_bf16.safetensors | 0.58 GB | Kijai/WanVideo_comfy (FlashVSR/) |
+  | flashvsr_1_3b | vae/Wan2_1_FlashVSR_TCDecoder_fp32.safetensors | 0.18 GB | Kijai/WanVideo_comfy (FlashVSR/) |
+  | flashvsr, wan22 | text_encoders/umt5_xxl_fp16.safetensors | 11.37 GB | Comfy-Org/Wan_2.1_ComfyUI_repackaged |
+  | wan22_detailer | diffusion_models/Wan2_2-T2V-A14B-LOW_fp8_e4m3fn_scaled_KJ.safetensors | 15.00 GB | Kijai/WanVideo_comfy_fp8_scaled (T2V/) |
+  | wan22_detailer | loras/Wan22_A14B_T2V_LOW_Lightning_4steps_lora_250928_rank64_fp16.safetensors | 0.61 GB | Kijai/WanVideo_comfy LoRAs/Wan22-Lightning/ (sha256 a0f19379...0541) |
+  | wan22_detailer | vae/wan_2.1_vae.safetensors | 0.25 GB | Comfy-Org/Wan_2.1_ComfyUI_repackaged |
+  Exact repo paths for the files not downloaded in these sessions are from memory: check on HF.
+
+### Done (session 2026-11-10, Wan 2.2 detailer)
+- `profiles/wan22_detailer.yaml` + `workflows/wan22_detailer_api.json`, written by hand from
+  WanVideoWrapper nodes (ComfyUI 0.44 ships no Wan video-upscale template): LoadVideo -> resize
+  (multiple 16) -> WanVideoEncode (tiled) -> WanVideoSampler (Wan 2.2 T2V A14B LOW fp8, Lightning
+  LoRA merged, cfg 1, euler, 8 steps, denoise 0.3, shift 1, samples = source latent) -> decode
+  (tiled) -> ProRes. The frame count comes from the input (no ImageFromBatch / length override).
+  Output aligned with the input (best at shift 0, no frame_delay).
+- Downloaded with the user's approval: the Lightning LOW LoRA (614 MB, sha256 verified).
+- Test on a real 960x544 clip, 81 frames (SeedVR2 -> 1906x1080, then Wan -> 1904x1088):
+  - SeedVR2 3B: 3:07 for 81 frames (2.31 s/frame).
+  - Wan: 20 blocks swapped -> OOM (170k tokens). 40 blocks swapped: 19:37 (14.5 s/frame:
+    sampling 4.7 min/step x 3, VAE encode 1:41, decode ~3 min), peak 16.5 GB VRAM.
+  - shift 5 (t2v default) redrew shapes: 21 dB vs SeedVR2. shift 1 fixes it.
+  - 33 frames, metrics (luma; detail = high-pass RMS; flicker = high-pass change frame to frame):
+    SeedVR2 32.3 dB vs source, detail 4.34, flicker 1.54; +Wan 0.30: 28.5 dB vs SeedVR2, detail
+    3.96, flicker 1.40; +Wan 0.45: 25.6 dB, detail 3.98, flicker 1.44. ~6 min per 33 frames.
+  - User: "looks a bit more detailed but hard to say". Verdict so far: Wan redraws texture, doesn't
+    add measurable detail, ~6x SeedVR2's cost. Keep as an optional pass for short shots.
+- Not done: chaining (`--profile seedvr2_3b,wan22_detailer`); for now run the detailer on a
+  SeedVR2 master as a second `vsr run`.
+- Gotcha: the job id doesn't include the workflow/profile *content*: after editing a workflow,
+  rerunning the same command reuses finished chunks. Use `--redo` or another `--jobs-dir`.
+  (Worth fixing: hash the patched workflow into the job id.)
+- Gotcha: analysing 1080p clips in numpy all at once (several GB float32) while ComfyUI holds
+  swapped Wan blocks in RAM got the whole terminal killed by systemd-oomd. Stream a few frames.
 
 ### Done (session 2026-11-10, detect-res)
 - `vsr detect-res <video> [--frames 12] [--range] [-v]` (`vsr/detect.py`): for every even height in
@@ -141,12 +189,9 @@ uv run vsr run <clip> --profile seedvr2_3b --fake identity --out /tmp/x   # full
 # real end-to-end test: see README "Manual end-to-end test"
 ```
 
-### Next (milestone 5: Wan detailer profile; multi-stage chaining)
-- Needs from the user: the Wan 2.2 detailer workflow exported in API format, in `workflows/`.
-  Then `vsr inspect` it and write `profiles/wan22_detailer.yaml` (frames <= 81, 4n+1; override
-  `ImageFromBatch` batch_index=0 / length=chunk length if it is the "Utility Video Upscale" one).
-  The `length` override depends on each chunk, so profiles need a way to say "chunk length"
-  (e.g. a `$chunk_frames` placeholder in overrides).
+### Next (milestone 5: multi-stage chaining)
+- Wan detailer profile: done (above). Options to test if wanted: SeedVR2 7B (template exists,
+  ~8 GB int8 download), Wan denoise 0.2-0.5, 41-frame chunks (faster attention per frame).
 - Chaining: `--profile a,b`. Stage k's stitched output is a lossless intermediate (FFV1 .mkv or
   x264 lossless) fed to stage k+1 as its source, `/free` between stages, master only after the
   last stage. Each stage = its own job dir/manifest under a parent job.
