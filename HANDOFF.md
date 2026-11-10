@@ -46,8 +46,8 @@
   many, stitching skips the first `frame_delay` frames (`stitch.window`). Job id includes it when
   non-zero. Fake model `--fake delay1` + `test_frame_delay_realigned`. Verified on the real server:
   best alignment at shift 0 after the fix.
-- FlashVSR needs output width/height divisible by 16: node 16 `ImageResizeKJv2` (KJNodes) rounds
-  the x2 size down (stretch; no-op for 960x544 -> 1920x1088, 854x480 -> 1696x960).
+- FlashVSR needs output width/height divisible by 16 (else einops "can't divide axis ... in chunks
+  of 16"): handled by the profile `resize.multiple: 16` (the temporary ImageResizeKJv2 node is gone).
 
 ### Done (session 2026-11-09, milestone 4)
 - `vsr/job.py`: `Manifest` (`jobs/<id>/manifest.json`, atomic write): run args, plan, per-chunk
@@ -135,7 +135,7 @@
 
 ### Rerun tests
 ```
-uv sync && uv run pytest -q          # 79 tests, ~21 s, needs ffmpeg, no GPU (mock ComfyUI)
+uv sync && uv run pytest -q          # 87 tests, ~21 s, needs ffmpeg, no GPU (mock ComfyUI)
 uv run vsr run <clip> --profile seedvr2_3b --dry-run
 uv run vsr run <clip> --profile seedvr2_3b --fake identity --out /tmp/x   # full pipeline, no ComfyUI
 # real end-to-end test: see README "Manual end-to-end test"
@@ -160,15 +160,23 @@ uv run vsr run <clip> --profile seedvr2_3b --fake identity --out /tmp/x   # full
   Not downloaded: `umt5-xxl-enc-bf16` (11.4 GB); the existing `umt5_xxl_fp16` works with Kijai's T5 loader.
   No settings changed, no custom nodes installed. Disk was 98% full afterwards (24 GB free).
 
+### Open for the user (as of 2026-11-10)
+- Disk filled up on 2026-11-09 (ComfyUI went down); 67 GB free now. Could be freed, nothing deleted
+  yet: `jobs/` 4.5 GB, ComfyUI `output/vsr` 6.3 GB, `input/vsr` 560 MB, FlashVSR weights 6.4 GB
+  (keep or delete: user's call; FlashVSR looked "really smoothed" to the user).
+- Jobs created before the size/prescale commits can't be resumed (job-id key changed); delete them.
+- Suggested next real run: `uv run vsr run <720p clip> --profile seedvr2_3b --prescale 480`
+  (detect-res crops of the user's 720p clip: 480/432 round trips look almost identical to source).
+- DNxHD/DNxHR needs >= 256 px wide input (tests with tiny clips use ProRes).
+
 ### Notes / open questions
 - System ffmpeg is 4.4 (Ubuntu 22.04): no `-fps_mode`; `ffmpeg.vsync()` picks `-vsync` on < 5.1.
 - Each cut re-decodes the source from frame 0 (`trim`): fine for <= 60 s (1080p 10 s: 2 s for 3
   cuts). For long sources, decode once to a lossless intermediate and slice that.
 - Chunk intermediates are yuv420p 8-bit: loses chroma/bit depth for 10-bit or 4:4:4 sources.
   Codec is configurable in code (`ChunkCodec`) but not yet from the CLI/profile.
-- ComfyUI 0.44.0 reachable at http://127.0.0.1:8188 from this environment (checked
-  /system_stats, /queue, /history). History was empty, so the real output-entry shape
-  (`images`/`gifs`/`videos`) still has to be checked on a real run in milestone 3.
+- ComfyUI 0.44.0 at http://127.0.0.1:8188, started by the user with
+  `main.py --enable-manager --use-sage-attention --fast fp16_accumulation`.
 - For the user: chunk uploads pile up in ComfyUI `input/vsr/` and outputs in `output/vsr/` (no
   delete endpoint). Clean them by hand. They also appear in LoadVideo's file list in the UI.
 - SeedVR2 is slow here: ~1.7 s/frame at 1708x960 (tiled VAE, INT8). Not investigated.
